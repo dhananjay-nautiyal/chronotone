@@ -21,7 +21,7 @@ That one constraint changes what the project can be:
 
 ## Status
 
-Phases 1–3 of the roadmap are complete and working:
+Phases 1–4 of the roadmap are complete and working:
 
 - Append-only, tamper-evident **event log** (canonical JSON + hash chain, zero dependencies)
 - **Connector SPI** plus a deterministic synthetic connector for demos and CI
@@ -34,8 +34,11 @@ Phases 1–3 of the roadmap are complete and working:
   44.1 kHz PCM WAV written by a small built-in synth (no audio libraries, no soundfont downloads)
 - **Merkle commitments**: publish a root over a day, prove one entry is inside it, and verify that
   proof from two small JSON files without the log
+- **Live station mode**: the trailing window is re-rendered as the clock moves, by an incremental
+  synth that is sample-exact with the batch one — a live frame is byte-identical to the render of
+  the same window, and it can stream straight into a player
 - **Timeline fingerprint**, `sha256` of the MIDI and WAV, and a chain `verify` command
-- CLI: `init`, `demo`, `sync`, `render`, `commit`, `prove`, `check`, `verify`
+- CLI: `init`, `demo`, `sync`, `render`, `station`, `commit`, `prove`, `check`, `verify`
 
 ## Quickstart
 
@@ -62,6 +65,36 @@ java -jar "$JAR" verify --log .chronotone/demo.jsonl
 ```
 
 Listen to the same minute twice and compare the hashes: they will be identical.
+
+### Listening live
+
+`station` keeps a trailing window of the log and re-renders it as the clock moves, so you can listen
+to today while it is still happening instead of waiting for the end of the day.
+
+```bash
+# The last 30 minutes, ending on the current minute boundary
+java -jar "$JAR" station --log .chronotone/demo.jsonl --window 30m --out out/station
+
+# Keep it up, and pipe the audio straight into a player: raw 16-bit PCM, mono, 44.1 kHz
+java -jar "$JAR" station --log .chronotone/demo.jsonl --follow --every 60s --stream \
+  | ffplay -f s16le -ar 44100 -ac 1 -
+```
+
+Two things are worth knowing, and CI checks both:
+
+- **A frame is the same bytes as a `render` of the same window.** The window always ends on a grid
+  boundary, so slots follow the wall clock, and `station --now <iso>` is a pure function — pin it and
+  the `wav_sha256` in `out/station/station.json` never changes. That manifest also records
+  `slot_samples`, the sample offset of every slot boundary, so a consumer can seek inside a frame
+  without re-deriving the tempo itself.
+- **Going live costs no fidelity.** The synth runs one slot at a time (`StreamingSynth`), carrying the
+  reverb's delay lines instead of buffering the whole session, and it produces the very same samples
+  the batch renderer would. That equality is asserted sample-for-sample in the tests.
+
+`--stream` writes only the slots that have closed since the last tick, and each of those blocks is
+byte-identical to the batch render of the window that produced it. Status lines go to stderr, so
+stdout stays pure PCM. With `--now` pinned, `--follow --every 60s --ticks 3` is a deterministic
+three-frame run — which is exactly how CI exercises it.
 
 ### Commitments
 
@@ -148,7 +181,8 @@ connectors (git, scrobble, weather, health)
               └─► mapping DSL    window + aggregate + range  ──►  musical params per slot
                       └─► score builder    params ──► notes (PPQ 480)
                               ├─► SMF writer     ──► chronotone.mid
-                              └─► built-in synth ──► chronotone.wav
+                              └─► synth ─────────► chronotone.wav     (a whole window at once)
+                                      └─ StreamingSynth ──► live PCM   (one slot at a time, same samples)
 ```
 
 A mapping is data, not code:
@@ -183,9 +217,9 @@ so a day has its own tonal identity. See `chronotone-dsl/src/main/java/dev/chron
 | --- | --- | --- |
 | `chronotone-core` | `Event`, canonical JSON, JSON reader, hash chain, `EventLog`, Merkle tree/proofs/commitments, connector SPI | **none** |
 | `chronotone-dsl` | Mapping DSL: parse, validate, evaluate | core, SnakeYAML |
-| `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth | core, dsl |
+| `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth, incremental `StreamingSynth`, live `Station` | core, dsl |
 | `chronotone-connectors` | git history, CSV/JSONL exports, Open-Meteo weather, incremental sync | core, SnakeYAML |
-| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `commit` / `prove` / `check` / `verify` | all |
+| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `station` / `commit` / `prove` / `check` / `verify` | all |
 
 ## Determinism rules
 
@@ -194,6 +228,14 @@ algorithm) seeded from a mixing function of `(seed, slot)`, and integer ticks �
 no hash-map iteration order, no float accumulation across threads. The render manifest deliberately
 contains no timestamp so that two renders can be `diff`ed in CI.
 
+The incremental synth keeps that promise without any new state: it visits voices in the order the
+score produced them (floating-point addition is not associative, so summation order is part of the
+contract) and carries the reverb's feedback delay lines across block boundaries. A block split only
+decides *when* samples are produced, never which samples they are.
+
+`station` is the one command that reads the clock, and it reads it for a single purpose: choosing the
+window. Pin `--now` and everything downstream is a pure function of the inputs again.
+
 ## Roadmap
 
 | Phase | Scope | State |
@@ -201,9 +243,13 @@ contains no timestamp so that two renders can be `diff`ed in CI.
 | **1** | Event log, connector SPI, mapping DSL, deterministic MIDI + WAV render, CLI, CI | ✅ |
 | **2** | Real connectors (git, CSV/JSONL exports, Open-Meteo weather), incremental idempotent sync | ✅ |
 | **3** | Merkle commitments: publish a root, prove inclusion, verify without the log | ✅ |
-| 4 | Live station mode: render the last N minutes continuously, then commit the day | next |
-| 5 | Android/KMP player with timeline scrubbing | planned |
+| **4** | Live station mode: an incremental, sample-exact synth; a rolling window rendered as the clock moves; raw-PCM streaming | ✅ |
+| 5 | Android/KMP player with timeline scrubbing | next |
 | 6 | Monthly album export: stems, mastering, generative cover art, share card | planned |
+
+Phase 4 deliberately stops short of "commit the day" — the day-level commitment is already `commit`,
+so a station needs a *day-close* step rather than a new artifact, and that belongs with the album
+export in phase 6.
 
 ## Honest limitations
 
@@ -217,6 +263,12 @@ Merkle commitments close the biggest gap, but not every one. Still true today:
   are what stays private.
 - **A tree over 24 entries is small.** Anything short of a full privacy design (padding, hiding the
   slice size) leaks the number of events and their rough times.
+- **A station is a rolling window, not a gapless stream.** It re-masters its window on each tick and
+  emits every closed slot once, so the blocks are sample-exact but gain is normalised per window and
+  can step slightly from tick to tick. The master of a whole day is still `chronotone render`.
+- **A station cannot hear the future.** A slot is played once it closes, so an event that arrives
+  later is not retroactively inserted into what you already heard. Re-rendering the same `--now`
+  does include it, because a frame is a pure function of the log.
 - **The synth is deliberately plain.** The WAV is clean and listenable, not mastered.
 
 ## License

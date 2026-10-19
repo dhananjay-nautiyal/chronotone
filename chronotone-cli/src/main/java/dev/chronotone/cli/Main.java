@@ -20,6 +20,7 @@ import dev.chronotone.dsl.MappingSpec;
 import dev.chronotone.dsl.ParamSpec;
 import dev.chronotone.render.Chronotone;
 import dev.chronotone.render.RenderResult;
+import dev.chronotone.render.Station;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -33,15 +34,19 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
- * {@code chronotone init|demo|sync|render|commit|prove|check|verify}.
+ * {@code chronotone init|demo|sync|render|station|commit|prove|check|verify}.
  *
  * <p>No wall-clock values are written into any artifact, so two renders of the same inputs can be
  * compared byte for byte — and so can two commitments of the same slice. That is exactly what CI does.
+ *
+ * <p>{@code station} is the exception that proves it: it reads the clock, but only to decide <em>which
+ * window</em> to render. Pin {@code --now} and a station frame is as deterministic as any other render.
  */
 public final class Main {
 
@@ -63,6 +68,7 @@ public final class Main {
                 case "demo" -> demo(options);
                 case "sync" -> sync(options);
                 case "render" -> render(options);
+                case "station" -> station(options);
                 case "commit" -> commit(options);
                 case "prove" -> prove(options);
                 case "check" -> check(options);
@@ -193,6 +199,141 @@ public final class Main {
                 + out.resolve("chronotone.wav") + ", " + out.resolve("chronotone.json"));
         System.out.println();
         System.out.println("render again with the same arguments: the hashes must not change.");
+    }
+
+    /**
+     * Live station: the trailing {@code --window} of the log, re-rendered as the clock moves.
+     *
+     * <p>A frame is the same bytes {@code render} would have produced for the same window, so going
+     * live costs no fidelity. With {@code --follow} the window advances a slot at a time and only a
+     * changed window is re-rendered; with {@code --stream} the blocks that closed since the last tick
+     * go to stdout as raw 16-bit PCM, so a player can be piped to directly. Status lines go to stderr,
+     * keeping stdout clean for that pipe.
+     *
+     * <p>Gain is normalised per window — the peak of the whole session is not knowable while it is
+     * still running. Each frame is an honest master of its own window; the master of a whole day is
+     * still {@code chronotone render}.
+     */
+    private static void station(Map<String, String> options) throws IOException, InterruptedException {
+        Path log = Path.of(options.getOrDefault("log", DEFAULT_LOG));
+        Path out = Path.of(options.getOrDefault("out", "out/station"));
+        long seed = Long.parseLong(options.getOrDefault("seed", "42"));
+        Duration window = parseDuration(options.getOrDefault("window", "30m"));
+        Duration every = parseDuration(options.getOrDefault("every", "15s"));
+        boolean follow = Boolean.parseBoolean(options.getOrDefault("follow", "false"));
+        boolean stream = Boolean.parseBoolean(options.getOrDefault("stream", "false"));
+        Instant pinned = options.containsKey("now") ? Instant.parse(options.get("now")) : null;
+        int ticks = Integer.parseInt(options.getOrDefault("ticks", follow ? "-1" : "1"));
+
+        MappingSpec mapping = new MappingParser().parse(mappingYaml(options));
+        if (window.compareTo(mapping.grid()) < 0) {
+            throw new IllegalStateException("--window (" + window + ") must be at least one grid step ("
+                    + mapping.grid() + ")");
+        }
+        if (every.isZero() || every.isNegative()) {
+            throw new IllegalStateException("--every must be positive");
+        }
+        if (!Files.exists(log)) {
+            throw new IllegalStateException("no log at " + log
+                    + " — run `chronotone demo` or `chronotone sync` first");
+        }
+        Files.createDirectories(out);
+
+        System.err.println("station    window " + window + " | every " + every + " | seed " + seed
+                + (follow ? " | following" : "") + (stream ? " | streaming raw PCM to stdout" : ""));
+        System.err.println("log        " + log + "   out " + out.toAbsolutePath());
+
+        Instant cursor = null;
+        Instant lastTo = null;
+        for (int tick = 0; ticks < 0 || tick < ticks; tick++) {
+            Instant now = pinned == null ? Instant.now() : pinned.plusSeconds(tick * every.toSeconds());
+            Instant to = Station.align(now, mapping.grid());
+
+            if (!to.equals(lastTo)) {
+                List<Event> events = EventLog.readEvents(log);
+                if (events.isEmpty() && lastTo == null) {
+                    System.err.println("warn       no events in " + log
+                            + " — the station will play its quiet floor until you sync");
+                }
+                Station.Frame frame = Station.frame(mapping, events, now, window, seed);
+                Files.write(out.resolve("chronotone.wav"), frame.wav());
+                Files.writeString(out.resolve("station.json"),
+                        stationManifest(frame, mapping, window, seed, events.size()));
+
+                if (cursor == null) {
+                    // Start listening from the slot that has just closed, not from the whole window.
+                    cursor = Station.listenFrom(frame);
+                }
+                int streamed = 0;
+                if (stream) {
+                    for (int block : Station.blocksAfter(frame, cursor)) {
+                        System.out.write(frame.pcmOfBlock(block));
+                        cursor = frame.timeline().slot(block);
+                        streamed++;
+                    }
+                    System.out.flush();
+                }
+
+                lastTo = to;
+                System.err.println("tick       " + Event.formatTimestamp(to) + "  " + frame.summary()
+                        + "  wav " + frame.wavHash().substring(0, 12)
+                        + (stream ? "  streamed " + streamed + " slot(s)" : ""));
+            }
+
+            boolean more = ticks < 0 || tick + 1 < ticks;
+            if (pinned == null && more) {
+                Thread.sleep(every.toMillis());
+            }
+        }
+        System.err.println("wrote      " + out.resolve("chronotone.wav") + ", " + out.resolve("station.json"));
+    }
+
+    private static String stationManifest(Station.Frame frame, MappingSpec mapping, Duration window,
+                                          long seed, int eventsInLog) {
+        Map<String, Object> manifest = new LinkedHashMap<>();
+        manifest.put("tool", "chronotone");
+        manifest.put("version", VERSION);
+        manifest.put("format", Station.FORMAT);
+        manifest.put("mapping", mapping.version());
+        manifest.put("grid", mapping.grid().toString());
+        manifest.put("window", window.toString());
+        manifest.put("from", Event.formatTimestamp(frame.from()));
+        manifest.put("to", Event.formatTimestamp(frame.to()));
+        manifest.put("seed", seed);
+        manifest.put("events_in_log", eventsInLog);
+        manifest.put("slots", frame.slots());
+        manifest.put("notes", frame.notes());
+        manifest.put("seconds", StrictMath.round(frame.seconds() * 1000.0) / 1000.0);
+        List<Integer> bounds = new ArrayList<>(frame.bounds().length);
+        for (int offset : frame.bounds()) {
+            bounds.add(offset);
+        }
+        manifest.put("slot_samples", bounds);
+        manifest.put("timeline_sha256", frame.timelineFingerprint());
+        manifest.put("wav_sha256", frame.wavHash());
+        manifest.put("timeline", frame.timeline().describe());
+        manifest.put("note", "gain is normalised per window; the master of a whole day is `render`");
+        return CanonicalJson.write(manifest) + "\n";
+    }
+
+    /** Accepts {@code 30m}, {@code 90s}, {@code 6h}, {@code 2d}, or a bare number of minutes. */
+    private static Duration parseDuration(String value) {
+        String text = value.trim().toLowerCase(Locale.ROOT);
+        if (text.isEmpty()) {
+            throw new IllegalStateException("empty duration");
+        }
+        char unit = text.charAt(text.length() - 1);
+        if (Character.isDigit(unit)) {
+            return Duration.ofMinutes(Long.parseLong(text));
+        }
+        long amount = Long.parseLong(text.substring(0, text.length() - 1));
+        return switch (unit) {
+            case 's' -> Duration.ofSeconds(amount);
+            case 'm' -> Duration.ofMinutes(amount);
+            case 'h' -> Duration.ofHours(amount);
+            case 'd' -> Duration.ofDays(amount);
+            default -> throw new IllegalStateException("unknown duration unit '" + unit + "' in " + value);
+        };
     }
 
     /**
@@ -449,6 +590,9 @@ public final class Main {
                   chronotone sync    [--config <file>] [--log <file>] [--from <iso>] [--to <iso>] [--dry-run]
                   chronotone render  [--log <file>] [--out <dir>] [--day <yyyy-MM-dd>]
                                      [--from <HH:mm>] [--minutes <n>] [--seed <n>] [--mapping <file>]
+                  chronotone station [--log <file>] [--out <dir>] [--mapping <file>] [--seed <n>]
+                                     [--window <dur>] [--now <iso>] [--follow] [--every <dur>]
+                                     [--ticks <n>] [--stream]
                   chronotone commit  [--log <file>] [--day <yyyy-MM-dd>] [--from <iso>] [--to <iso>]
                                      [--out <file>]
                   chronotone prove   [--log <file>] --commitment <file> --index <n> [--out <file>]
@@ -459,6 +603,10 @@ public final class Main {
                   chronotone demo --seed 42
                   chronotone render --from 07:00 --minutes 30 --seed 42 --out out
                   chronotone verify
+
+                listening to the day as it happens:
+                  chronotone station --window 30m
+                  chronotone station --follow --every 60s --stream | ffplay -f s16le -ar 44100 -ac 1 -
 
                 with your own data:
                   cp examples/connectors.yaml .chronotone/connectors.yaml   # then edit it
