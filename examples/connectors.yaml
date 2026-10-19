@@ -1,0 +1,53 @@
+# Example connector config for Chronotone.
+#
+#   chronotone sync --config examples/connectors.yaml --dry-run
+#
+# Every connector reads from your machine (or a public, keyless weather API) and writes only to your
+# local event log. Nothing is uploaded. Copy this file to ~/.chronotone/connectors.yaml, point it at
+# your own exports, and keep the real one out of version control.
+
+connectors:
+
+  # Your own commits. Run chronotone from the repository root, or set an absolute path.
+  - id: git
+    type: git
+    repo: .
+    event_source: git
+    event_type: commit
+
+  # A health export: one row per activity window.
+  # Health Connect / Google Takeout / Apple Health CSV all fit here.
+  - id: steps
+    type: file
+    path: examples/steps.csv
+    format: csv
+    time_column: start_time
+    time_format: iso
+    event_source: health
+    event_type: steps
+    payload: steps,distance_m
+
+  # A listening history export: one row per play.
+  - id: scrobbles
+    type: file
+    path: examples/scrobbles.csv
+    format: csv
+    time_column: played_at
+    time_format: iso
+    event_source: music
+    event_type: scrobble
+    payload: artist,track,duration_s
+
+  # Historical weather, no API key. Commented out because it needs the network;
+  # uncomment and set your own coordinates to let the sky into the mix.
+  # - id: weather
+  #   type: open-meteo
+  #   latitude: 30.3165
+  #   longitude: 78.0322
+  #   event_source: weather
+  #   event_type: sample
+
+  # A deterministic fake day, useful for testing the pipeline without any personal data.
+  # - id: synthetic
+  #   type: synthetic
+  #   seed: 42

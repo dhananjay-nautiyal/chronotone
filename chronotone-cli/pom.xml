@@ -28,6 +28,10 @@
       <artifactId>chronotone-render</artifactId>
     </dependency>
     <dependency>
+      <groupId>dev.chronotone</groupId>
+      <artifactId>chronotone-connectors</artifactId>
+    </dependency>
+    <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter</artifactId>
       <scope>test</scope>

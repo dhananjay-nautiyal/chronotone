@@ -24,6 +24,7 @@
     <module>chronotone-core</module>
     <module>chronotone-dsl</module>
     <module>chronotone-render</module>
+    <module>chronotone-connectors</module>
     <module>chronotone-cli</module>
   </modules>
 
@@ -50,6 +51,11 @@
       <dependency>
         <groupId>dev.chronotone</groupId>
         <artifactId>chronotone-render</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>dev.chronotone</groupId>
+        <artifactId>chronotone-connectors</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>

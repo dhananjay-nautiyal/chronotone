@@ -1,5 +1,9 @@
 package dev.chronotone.cli;
 
+import dev.chronotone.connectors.ConnectorConfig;
+import dev.chronotone.connectors.ConnectorConfigFile;
+import dev.chronotone.connectors.SyncResult;
+import dev.chronotone.connectors.SyncService;
 import dev.chronotone.core.connector.SyntheticConnector;
 import dev.chronotone.core.log.CanonicalJson;
 import dev.chronotone.core.log.Event;
@@ -15,6 +19,7 @@ import dev.chronotone.render.RenderResult;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -50,6 +55,7 @@ public final class Main {
             switch (args[0]) {
                 case "init" -> init(options);
                 case "demo" -> demo(options);
+                case "sync" -> sync(options);
                 case "render" -> render(options);
                 case "verify" -> verify(options);
                 case "help", "--help", "-h" -> usage();
@@ -99,6 +105,42 @@ public final class Main {
         Map<String, Long> perSource = events.stream()
                 .collect(Collectors.groupingBy(Event::source, TreeMap::new, Collectors.counting()));
         System.out.println("sources    " + perSource);
+    }
+
+    /**
+     * Pulls events from every configured connector into the log. Incremental via per-connector
+     * watermarks and idempotent via content identity, so re-running never duplicates history.
+     */
+    private static void sync(Map<String, String> options) throws IOException {
+        Path log = Path.of(options.getOrDefault("log", DEFAULT_LOG));
+        Path config = Path.of(options.getOrDefault("config", ".chronotone/connectors.yaml"));
+        boolean dryRun = Boolean.parseBoolean(options.getOrDefault("dry-run", "false"));
+        Instant to = options.containsKey("to") ? Instant.parse(options.get("to")) : Instant.now();
+        Instant from = options.containsKey("from") ? Instant.parse(options.get("from")) : to.minus(Duration.ofDays(7));
+        if (from.isAfter(to)) {
+            throw new IllegalStateException("--from must be before --to");
+        }
+        if (!Files.exists(config)) {
+            throw new IllegalStateException("no connector config at " + config
+                    + " — copy examples/connectors.yaml and point it at your own exports");
+        }
+
+        List<ConnectorConfig> configs = ConnectorConfigFile.read(config);
+        if (configs.isEmpty()) {
+            throw new IllegalStateException("no connectors configured in " + config);
+        }
+        System.out.println("config     " + config);
+        for (ConnectorConfig connector : configs) {
+            System.out.println("  " + connector.id() + " (" + connector.type() + ")");
+        }
+        System.out.println("window     " + Event.formatTimestamp(from) + " -> " + Event.formatTimestamp(to));
+        if (dryRun) {
+            System.out.println("mode       dry run");
+        }
+
+        SyncResult result = new SyncService(log).sync(configs, from, to, dryRun);
+        System.out.println(result.summary());
+        System.out.println("watermarks " + result.watermarkPath());
     }
 
     /** Renders a window of the log to MIDI + WAV + a hash manifest. */
@@ -208,14 +250,21 @@ public final class Main {
                 usage:
                   chronotone init    [--log <file>]
                   chronotone demo    [--log <file>] [--day <yyyy-MM-dd>] [--seed <n>] [--append]
+                  chronotone sync    [--config <file>] [--log <file>] [--from <iso>] [--to <iso>] [--dry-run]
                   chronotone render  [--log <file>] [--out <dir>] [--day <yyyy-MM-dd>]
                                      [--from <HH:mm>] [--minutes <n>] [--seed <n>] [--mapping <file>]
                   chronotone verify  [--log <file>]
 
-                a first run:
+                a first run, with no personal data at all:
                   chronotone demo --seed 42
                   chronotone render --from 07:00 --minutes 30 --seed 42 --out out
                   chronotone verify
+
+                with your own data:
+                  cp examples/connectors.yaml .chronotone/connectors.yaml   # then edit it
+                  chronotone sync --config .chronotone/connectors.yaml --dry-run
+                  chronotone sync --config .chronotone/connectors.yaml
+                  chronotone render --from 21:00 --minutes 24 --out out
 
                 defaults:
                   --log %s    --out out    --seed 42    --from 07:00    --minutes 30

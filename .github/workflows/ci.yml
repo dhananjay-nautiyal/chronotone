@@ -21,6 +21,12 @@ jobs:
       - name: Build and test
         run: mvn -B -ntp verify
 
+      - name: Sync the real connectors (offline dry run)
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+          java -jar "$JAR" sync --config examples/connectors.yaml --dry-run \
+            --from 2026-10-19T00:00:00Z --to 2026-10-20T00:00:00Z
+
       - name: Prove the determinism contract
         run: |
           JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)

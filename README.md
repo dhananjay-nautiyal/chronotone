@@ -21,15 +21,19 @@ That one constraint changes what the project can be:
 
 ## Status
 
-Phase 1 of the roadmap is complete and working:
+Phase 1 and Phase 2 of the roadmap are complete and working:
 
 - Append-only, tamper-evident **event log** (canonical JSON + hash chain, zero dependencies)
 - **Connector SPI** plus a deterministic synthetic connector for demos and CI
+- **Connectors that read real life**: your local git history, CSV/JSONL data exports you already
+  own, and historical weather from Open-Meteo (no API key)
+- **`sync`**: incremental via per-connector watermarks, idempotent via content identity, with a
+  dry-run mode that touches nothing
 - **Mapping DSL** (YAML): window an event source, aggregate it, map the aggregate into a musical dimension
 - **Deterministic renderer**: timeline → note score → Standard MIDI File *and* a self-contained
   44.1 kHz PCM WAV written by a small built-in synth (no audio libraries, no soundfont downloads)
 - **Timeline fingerprint**, `sha256` of the MIDI and WAV, and a chain `verify` command
-- CLI: `init`, `demo`, `render`, `verify`
+- CLI: `init`, `demo`, `sync`, `render`, `verify`
 
 ## Quickstart
 
@@ -56,6 +60,55 @@ java -jar "$JAR" verify --log .chronotone/demo.jsonl
 ```
 
 Listen to the same minute twice and compare the hashes: they will be identical.
+
+### With your own data
+
+Nothing personal ever goes into this repository — connectors run locally and write to a log that
+stays on your disk. `examples/connectors.yaml` is a working config you can copy and edit:
+
+```bash
+cp examples/connectors.yaml .chronotone/connectors.yaml     # then point it at your own exports
+
+java -jar "$JAR" sync --config .chronotone/connectors.yaml --dry-run   # see what would be added
+java -jar "$JAR" sync --config .chronotone/connectors.yaml             # append it
+java -jar "$JAR" render --from 07:00 --minutes 100 --out out
+java -jar "$JAR" verify
+```
+
+## Connectors
+
+A connector turns one source of your life into events. Adding a source is a config entry, not code.
+
+| Type | Reads | Options |
+| --- | --- | --- |
+| `git` | your local commit history via `git log --numstat` | `repo` |
+| `file` | any CSV or JSONL export you already have (health, listening history, habits) | `path`, `format`, `time_column`, `time_format`, `payload` |
+| `open-meteo` | historical hourly weather (keyless public API) | `latitude`, `longitude` |
+| `synthetic` | a deterministic fake day, for tests and demos | `seed` |
+
+```yaml
+connectors:
+  - id: git
+    type: git
+    repo: ~/projects/chronotone
+  - id: scrobbles
+    type: file
+    path: ~/exports/scrobbles.csv
+    format: csv
+    time_column: played_at
+    time_format: iso          # iso | epoch_s | epoch_ms | <pattern>
+    event_source: music
+    event_type: scrobble
+    payload: artist,track,duration_s
+```
+
+**Privacy.** Events are produced on your machine and appended to a local log. The only network call
+in the whole project is the weather connector, which sends a latitude and a longitude and nothing
+else. The engine is public; your life is not.
+
+**Sync is safe to re-run.** A watermark per connector means the next sync only asks for new time,
+and an event's identity is `sha256(connectorId + canonical event)`, so overlapping windows cannot
+duplicate history. Deleting the watermarks entirely still appends nothing twice.
 
 ## How a day becomes music
 
@@ -101,7 +154,8 @@ so a day has its own tonal identity. See `chronotone-dsl/src/main/java/dev/chron
 | `chronotone-core` | `Event`, canonical JSON, JSON reader, hash chain, `EventLog`, connector SPI | **none** |
 | `chronotone-dsl` | Mapping DSL: parse, validate, evaluate | core, SnakeYAML |
 | `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth | core, dsl |
-| `chronotone-cli` | `init` / `demo` / `render` / `verify` | all |
+| `chronotone-connectors` | git history, CSV/JSONL exports, Open-Meteo weather, incremental sync | core, SnakeYAML |
+| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `verify` | all |
 
 ## Determinism rules
 
@@ -115,8 +169,8 @@ contains no timestamp so that two renders can be `diff`ed in CI.
 | Phase | Scope | State |
 | --- | --- | --- |
 | **1** | Event log, connector SPI, mapping DSL, deterministic MIDI + WAV render, CLI, CI | ✅ |
-| 2 | Real connectors (git, Last.fm/Subsonic, weather, health) | next |
-| 3 | Merkle commitments so a hash can be published while the payloads stay private | planned |
+| **2** | Real connectors (git, CSV/JSONL exports, Open-Meteo weather), incremental idempotent sync | ✅ |
+| 3 | Merkle commitments so a hash can be published while the payloads stay private | next |
 | 4 | Live station mode: render the last N minutes continuously, then commit the day | planned |
 | 5 | Android/KMP player with timeline scrubbing | planned |
 | 6 | Monthly album export: stems, mastering, generative cover art, share card | planned |
