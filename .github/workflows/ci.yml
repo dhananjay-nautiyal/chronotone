@@ -37,6 +37,29 @@ jobs:
           # The manifest carries no wall-clock fields, so byte-identical output is the assertion.
           diff out/a/chronotone.json out/b/chronotone.json
 
+      - name: Prove the commitment round-trip
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+          java -jar "$JAR" commit --log .chronotone/demo.jsonl --out out/commitment.json
+          java -jar "$JAR" commit --log .chronotone/demo.jsonl --out out/commitment2.json
+          diff out/commitment.json out/commitment2.json          # commitments are deterministic too
+          java -jar "$JAR" prove --commitment out/commitment.json --index 4 --out out/proof.json
+          java -jar "$JAR" verify --log .chronotone/demo.jsonl --commitment out/commitment.json
+
+          # check must pass with only the two published files: no log, no config, no events.
+          mkdir -p /tmp/verifier-only
+          cp out/commitment.json out/proof.json /tmp/verifier-only/
+          cd /tmp/verifier-only
+          java -jar "$JAR_ABS" check --commitment commitment.json --proof proof.json
+
+          # ...and a forged proof must be rejected, with a non-zero exit code.
+          sed 's/"index":4/"index":5/' proof.json > forged.json
+          if java -jar "$JAR_ABS" check --commitment commitment.json --proof forged.json; then
+            echo "a forged proof was accepted"; exit 1
+          fi
+        env:
+          JAR_ABS: ${{ github.workspace }}/chronotone-cli/target/chronotone-cli-0.1.0-SNAPSHOT.jar
+
       - name: Upload the rendered day
         uses: actions/upload-artifact@v4
         with:

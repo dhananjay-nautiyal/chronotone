@@ -16,12 +16,12 @@ That one constraint changes what the project can be:
 | --- | --- |
 | Reproducible audio | The timeline becomes *navigable*, not random. A moment always sounds the same. |
 | Content addressing | Every render has a `sha256`. Share the hash, keep the events private. |
-| Tamper-evident history | The event log is a hash chain; the head hash is the log's public commitment. |
+| Tamper-evident history | The log is a hash chain, and a **Merkle root** over any slice can be published while the events stay private. |
 | CI-verifiable art | Two renders of the same day must be byte-identical, and CI enforces it. |
 
 ## Status
 
-Phase 1 and Phase 2 of the roadmap are complete and working:
+Phases 1–3 of the roadmap are complete and working:
 
 - Append-only, tamper-evident **event log** (canonical JSON + hash chain, zero dependencies)
 - **Connector SPI** plus a deterministic synthetic connector for demos and CI
@@ -32,8 +32,10 @@ Phase 1 and Phase 2 of the roadmap are complete and working:
 - **Mapping DSL** (YAML): window an event source, aggregate it, map the aggregate into a musical dimension
 - **Deterministic renderer**: timeline → note score → Standard MIDI File *and* a self-contained
   44.1 kHz PCM WAV written by a small built-in synth (no audio libraries, no soundfont downloads)
+- **Merkle commitments**: publish a root over a day, prove one entry is inside it, and verify that
+  proof from two small JSON files without the log
 - **Timeline fingerprint**, `sha256` of the MIDI and WAV, and a chain `verify` command
-- CLI: `init`, `demo`, `sync`, `render`, `verify`
+- CLI: `init`, `demo`, `sync`, `render`, `commit`, `prove`, `check`, `verify`
 
 ## Quickstart
 
@@ -60,6 +62,34 @@ java -jar "$JAR" verify --log .chronotone/demo.jsonl
 ```
 
 Listen to the same minute twice and compare the hashes: they will be identical.
+
+### Commitments
+
+The chain and the Merkle tree answer different questions. The chain proves *nothing in this log was
+edited*, but checking it needs every byte. A commitment lets you publish a root and later prove one
+event is inside it — without disclosing the rest.
+
+```bash
+java -jar "$JAR" commit --day 2026-10-19 --out out/commitment.json    # publish this file
+java -jar "$JAR" prove  --commitment out/commitment.json --index 4 --out out/proof.json
+java -jar "$JAR" check  --commitment out/commitment.json --proof out/proof.json
+java -jar "$JAR" verify --commitment out/commitment.json              # log still matches?
+```
+
+`check` reads only those two files: no log, no other entries, no payloads. For 24 committed entries
+the proof is 5 hashes.
+
+Why both? Because a hash chain alone cannot detect a *re-hashed rewrite*. If someone edits an event
+and recomputes every hash after it, the chain is internally consistent and `verify --log` says `OK`.
+Sending that forged log against a commitment published earlier makes it fail:
+
+```
+$ java -jar "$JAR" verify --log forged.jsonl                     # chain recomputed by the forger
+OK  24 entries  head=ad66d30742a8...
+
+$ java -jar "$JAR" verify --log forged.jsonl --commitment out/commitment.json
+FAILED  the log does not match this commitment
+```
 
 ### With your own data
 
@@ -151,11 +181,11 @@ so a day has its own tonal identity. See `chronotone-dsl/src/main/java/dev/chron
 
 | Module | Responsibility | Dependencies |
 | --- | --- | --- |
-| `chronotone-core` | `Event`, canonical JSON, JSON reader, hash chain, `EventLog`, connector SPI | **none** |
+| `chronotone-core` | `Event`, canonical JSON, JSON reader, hash chain, `EventLog`, Merkle tree/proofs/commitments, connector SPI | **none** |
 | `chronotone-dsl` | Mapping DSL: parse, validate, evaluate | core, SnakeYAML |
 | `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth | core, dsl |
 | `chronotone-connectors` | git history, CSV/JSONL exports, Open-Meteo weather, incremental sync | core, SnakeYAML |
-| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `verify` | all |
+| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `commit` / `prove` / `check` / `verify` | all |
 
 ## Determinism rules
 
@@ -170,16 +200,24 @@ contains no timestamp so that two renders can be `diff`ed in CI.
 | --- | --- | --- |
 | **1** | Event log, connector SPI, mapping DSL, deterministic MIDI + WAV render, CLI, CI | ✅ |
 | **2** | Real connectors (git, CSV/JSONL exports, Open-Meteo weather), incremental idempotent sync | ✅ |
-| 3 | Merkle commitments so a hash can be published while the payloads stay private | next |
-| 4 | Live station mode: render the last N minutes continuously, then commit the day | planned |
+| **3** | Merkle commitments: publish a root, prove inclusion, verify without the log | ✅ |
+| 4 | Live station mode: render the last N minutes continuously, then commit the day | next |
 | 5 | Android/KMP player with timeline scrubbing | planned |
 | 6 | Monthly album export: stems, mastering, generative cover art, share card | planned |
 
 ## Honest limitations
 
-The hash chain proves nothing was edited *if you trust the head hash*. It does not yet prove
-anything about events you have not disclosed — that needs Merkle proofs (Phase 3). Treat the
-current commitment as tamper-evidence within a log, not as a zero-knowledge claim.
+Merkle commitments close the biggest gap, but not every one. Still true today:
+
+- **The commitment is checked against a log you hold.** A commitment binds you to a history; it does
+  not prove the history is *complete*, or that events were not withheld.
+- **Proofs are inclusion-only.** There is no non-inclusion proof, so "this event was in the day" is
+  provable and "this event was not" is not.
+- **Event timestamps and source/type are public** in a commitment's scope description. The payloads
+  are what stays private.
+- **A tree over 24 entries is small.** Anything short of a full privacy design (padding, hiding the
+  slice size) leaks the number of events and their rough times.
+- **The synth is deliberately plain.** The WAV is clean and listenable, not mastered.
 
 ## License
 

@@ -8,7 +8,12 @@ import dev.chronotone.core.connector.SyntheticConnector;
 import dev.chronotone.core.log.CanonicalJson;
 import dev.chronotone.core.log.Event;
 import dev.chronotone.core.log.EventLog;
+import dev.chronotone.core.log.Hashes;
+import dev.chronotone.core.log.LoggedEvent;
 import dev.chronotone.core.log.VerifyResult;
+import dev.chronotone.core.merkle.Commitment;
+import dev.chronotone.core.merkle.MerkleProof;
+import dev.chronotone.core.merkle.MerkleTree;
 import dev.chronotone.dsl.DefaultMapping;
 import dev.chronotone.dsl.MappingParser;
 import dev.chronotone.dsl.MappingSpec;
@@ -25,6 +30,7 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -32,10 +38,10 @@ import java.util.TreeMap;
 import java.util.stream.Collectors;
 
 /**
- * {@code chronotone init|demo|render|verify}.
+ * {@code chronotone init|demo|sync|render|commit|prove|check|verify}.
  *
  * <p>No wall-clock values are written into any artifact, so two renders of the same inputs can be
- * compared byte for byte — which is exactly what CI does.
+ * compared byte for byte — and so can two commitments of the same slice. That is exactly what CI does.
  */
 public final class Main {
 
@@ -57,6 +63,9 @@ public final class Main {
                 case "demo" -> demo(options);
                 case "sync" -> sync(options);
                 case "render" -> render(options);
+                case "commit" -> commit(options);
+                case "prove" -> prove(options);
+                case "check" -> check(options);
                 case "verify" -> verify(options);
                 case "help", "--help", "-h" -> usage();
                 default -> {
@@ -186,14 +195,201 @@ public final class Main {
         System.out.println("render again with the same arguments: the hashes must not change.");
     }
 
-    /** Verifies the log's hash chain without rendering anything. */
+    /**
+     * Publishes a Merkle root over a slice of the log — a whole day with {@code --day}, an explicit
+     * {@code --from}/{@code --to} window, or everything. The root is the only thing you have to make
+     * public; the events stay on your disk.
+     */
+    private static void commit(Map<String, String> options) throws IOException {
+        Path log = Path.of(options.getOrDefault("log", DEFAULT_LOG));
+        Path out = Path.of(options.getOrDefault("out", "out/commitment.json"));
+        if (!Files.exists(log)) {
+            throw new IllegalStateException("no log at " + log
+                    + " — run `chronotone demo` or `chronotone sync` first");
+        }
+        List<LoggedEvent> slice = sliceOf(options, log);
+        Commitment commitment = Commitment.of(slice);
+
+        Files.createDirectories(out.toAbsolutePath().getParent());
+        Files.writeString(out, commitment.toJson());
+
+        System.out.println("log        " + log);
+        System.out.println("commitment " + commitment.describe());
+        System.out.println("merkleRoot " + commitment.merkleRoot());
+        System.out.println("chainHead  " + commitment.chainHead());
+        System.out.println("priorHead  " + commitment.priorHead());
+        System.out.println("rule       " + Commitment.RULE);
+        System.out.println("wrote      " + out);
+        System.out.println();
+        System.out.println("publish " + out.getFileName() + " (or just the merkleRoot) and keep the log private.");
+    }
+
+    /**
+     * Generates an inclusion proof for one entry of a committed slice: the audit path from that
+     * entry's hash up to the published root, and nothing else.
+     */
+    private static void prove(Map<String, String> options) throws IOException {
+        Path log = Path.of(options.getOrDefault("log", DEFAULT_LOG));
+        Path commitmentPath = Path.of(required(options, "commitment"));
+        Path out = Path.of(options.getOrDefault("out", "out/proof.json"));
+        int index = Integer.parseInt(required(options, "index"));
+
+        Commitment commitment = Commitment.fromJson(Files.readString(commitmentPath));
+        List<LoggedEvent> slice = sliceIn(log, commitment);
+        MerkleProof proof = commitment.treeOver(slice).proof(index);
+        if (!proof.verify() || !commitment.merkleRoot().equals(proof.root())) {
+            throw new IllegalStateException("internal error: the generated proof does not match the commitment");
+        }
+
+        Files.createDirectories(out.toAbsolutePath().getParent());
+        Files.writeString(out, proof.toJson());
+
+        LoggedEvent entry = slice.get(index);
+        System.out.println("commitment " + commitmentPath);
+        System.out.println("entry      #" + index + "  " + entry.event().source() + "/" + entry.event().type()
+                + "  " + Event.formatTimestamp(entry.event().timestamp()));
+        System.out.println("proof      " + proof.describe());
+        System.out.println("entryHash  " + proof.entryHash());
+        System.out.println("wrote      " + out);
+        System.out.println();
+        System.out.println("this proof names no other entry and carries no payload.");
+    }
+
+    /**
+     * Verifies a proof against a commitment using only those two files. The log is deliberately not
+     * read: a verifier should not need it, which is the entire point of a commitment.
+     */
+    private static void check(Map<String, String> options) throws IOException {
+        Path commitmentPath = Path.of(required(options, "commitment"));
+        Path proofPath = Path.of(required(options, "proof"));
+
+        Commitment commitment = Commitment.fromJson(Files.readString(commitmentPath));
+        MerkleProof proof = MerkleProof.fromJson(Files.readString(proofPath));
+
+        List<String> problems = new ArrayList<>();
+        if (!proof.root().equals(commitment.merkleRoot())) {
+            problems.add("the proof is against root " + proof.root()
+                    + " but the commitment says " + commitment.merkleRoot());
+        }
+        if (proof.size() != commitment.entries()) {
+            problems.add("the proof covers " + proof.size() + " entries but the commitment says "
+                    + commitment.entries());
+        }
+        if (!proof.verify()) {
+            problems.add(proof.failureReason() == null
+                    ? "the audit path does not verify"
+                    : proof.failureReason());
+        }
+
+        System.out.println("commitment " + commitmentPath + "  (" + commitment.describe() + ")");
+        System.out.println("proof      " + proofPath + "  (" + proof.describe() + ")");
+        if (problems.isEmpty()) {
+            System.out.println("OK  entry #" + proof.index() + " is included in the committed slice");
+            System.out.println("    checked without reading the log, the other entries or any payload");
+        } else {
+            for (String problem : problems) {
+                System.out.println("FAILED  " + problem);
+            }
+            System.exit(1);
+        }
+    }
+
+    /** Verifies the log's hash chain, and optionally that it still matches a published commitment. */
     private static void verify(Map<String, String> options) throws IOException {
         Path log = Path.of(options.getOrDefault("log", DEFAULT_LOG));
         VerifyResult result = EventLog.verify(log);
         System.out.println(result);
-        if (!result.ok()) {
+        boolean ok = result.ok();
+
+        if (options.containsKey("commitment")) {
+            Path commitmentPath = Path.of(options.get("commitment"));
+            System.out.println("commitment " + commitmentPath);
+            try {
+                Commitment commitment = Commitment.fromJson(Files.readString(commitmentPath));
+                List<LoggedEvent> slice = sliceIn(log, commitment);
+                System.out.println("           " + commitment.describe());
+                if (commitment.covers(slice)) {
+                    System.out.println("OK  the log matches the published commitment " + commitment.merkleRoot());
+                } else {
+                    System.out.println("FAILED  the log does not match the published commitment");
+                    ok = false;
+                }
+            } catch (IOException | RuntimeException e) {
+                System.out.println("FAILED  " + e.getMessage());
+                ok = false;
+            }
+        }
+        if (!ok) {
             System.exit(1);
         }
+    }
+
+    /** The log entries a command covers: a whole {@code --day}, an explicit window, or everything. */
+    private static List<LoggedEvent> sliceOf(Map<String, String> options, Path log) throws IOException {
+        List<LoggedEvent> entries = EventLog.readEntries(log);
+        Instant from = null;
+        Instant to = null;
+        if (options.containsKey("day")) {
+            LocalDate day = LocalDate.parse(options.get("day"));
+            from = day.atStartOfDay(ZoneOffset.UTC).toInstant();
+            to = day.plusDays(1).atStartOfDay(ZoneOffset.UTC).toInstant();
+        } else {
+            if (options.containsKey("from")) {
+                from = Instant.parse(options.get("from"));
+            }
+            if (options.containsKey("to")) {
+                to = Instant.parse(options.get("to"));
+            }
+        }
+        if (from == null && to == null) {
+            return entries;
+        }
+        List<LoggedEvent> slice = new ArrayList<>();
+        for (LoggedEvent entry : entries) {
+            Instant at = entry.event().timestamp();
+            if ((from == null || !at.isBefore(from)) && (to == null || at.isBefore(to))) {
+                slice.add(entry);
+            }
+        }
+        return slice;
+    }
+
+    /**
+     * Rebuilds the exact slice a commitment describes. The chain links it records — the hash before
+     * the slice and the hash at its end — locate the slice in the log exactly, so no timestamp
+     * guessing is involved.
+     */
+    private static List<LoggedEvent> sliceIn(Path log, Commitment commitment) throws IOException {
+        if (commitment.entries() == 0) {
+            return List.of();
+        }
+        List<LoggedEvent> slice = new ArrayList<>();
+        boolean collecting = Hashes.GENESIS.equals(commitment.priorHead());
+        for (LoggedEvent entry : EventLog.readEntries(log)) {
+            if (!collecting) {
+                if (entry.hash().equals(commitment.priorHead())) {
+                    collecting = true;
+                }
+                continue;
+            }
+            slice.add(entry);
+            if (entry.hash().equals(commitment.chainHead())) {
+                break;
+            }
+        }
+        if (!commitment.covers(slice)) {
+            throw new IllegalStateException("the log at " + log + " does not match this commitment — "
+                    + "the log has changed since it was published, or the commitment describes other entries");
+        }
+        return slice;
+    }
+
+    private static String required(Map<String, String> options, String key) {
+        String value = options.get(key);
+        if (value == null || value.isBlank()) {
+            throw new IllegalStateException("--" + key + " is required for this command");
+        }
+        return value;
     }
 
     private static String manifest(RenderResult result, MappingSpec mapping, LocalDate day,
@@ -253,7 +449,11 @@ public final class Main {
                   chronotone sync    [--config <file>] [--log <file>] [--from <iso>] [--to <iso>] [--dry-run]
                   chronotone render  [--log <file>] [--out <dir>] [--day <yyyy-MM-dd>]
                                      [--from <HH:mm>] [--minutes <n>] [--seed <n>] [--mapping <file>]
-                  chronotone verify  [--log <file>]
+                  chronotone commit  [--log <file>] [--day <yyyy-MM-dd>] [--from <iso>] [--to <iso>]
+                                     [--out <file>]
+                  chronotone prove   [--log <file>] --commitment <file> --index <n> [--out <file>]
+                  chronotone check   --commitment <file> --proof <file>
+                  chronotone verify  [--log <file>] [--commitment <file>]
 
                 a first run, with no personal data at all:
                   chronotone demo --seed 42
@@ -265,6 +465,11 @@ public final class Main {
                   chronotone sync --config .chronotone/connectors.yaml --dry-run
                   chronotone sync --config .chronotone/connectors.yaml
                   chronotone render --from 21:00 --minutes 24 --out out
+
+                publishing a hash without publishing your day:
+                  chronotone commit --day 2026-10-19 --out out/commitment.json
+                  chronotone prove  --commitment out/commitment.json --index 4 --out out/proof.json
+                  chronotone check  --commitment out/commitment.json --proof out/proof.json
 
                 defaults:
                   --log %s    --out out    --seed 42    --from 07:00    --minutes 30

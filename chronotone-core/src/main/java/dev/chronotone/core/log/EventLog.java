@@ -52,6 +52,19 @@ public final class EventLog implements Closeable {
         }
     }
 
+    /**
+     * The verified entries, chain links included. Returns an empty list if the log is absent.
+     * Commitment and proof generation need the entry hashes, not just the events.
+     */
+    public static List<LoggedEvent> readEntries(Path path) throws IOException {
+        if (!Files.exists(path)) {
+            return List.of();
+        }
+        try (EventLog log = open(path)) {
+            return log.entries();
+        }
+    }
+
     private void load() throws IOException {
         Path parent = path.toAbsolutePath().getParent();
         if (parent != null) {
