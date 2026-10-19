@@ -1,0 +1,9 @@
+target/
+out/
+.chronotone/
+*.mid
+*.wav
+.idea/
+*.iml
+.vscode/
+.DS_Store

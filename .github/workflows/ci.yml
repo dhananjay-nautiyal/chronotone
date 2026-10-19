@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Build and test
+        run: mvn -B -ntp verify
+
+      - name: Prove the determinism contract
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+          java -jar "$JAR" demo --log .chronotone/demo.jsonl --seed 42
+          java -jar "$JAR" render --log .chronotone/demo.jsonl --out out/a --seed 42
+          java -jar "$JAR" render --log .chronotone/demo.jsonl --out out/b --seed 42
+          java -jar "$JAR" verify --log .chronotone/demo.jsonl
+          # The manifest carries no wall-clock fields, so byte-identical output is the assertion.
+          diff out/a/chronotone.json out/b/chronotone.json
+
+      - name: Upload the rendered day
+        uses: actions/upload-artifact@v4
+        with:
+          name: chronotone-demo
+          path: out/a
