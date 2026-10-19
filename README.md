@@ -1,6 +1,11 @@
-# Chronotone
+![Chronotone — your life, rendered as sound](docs/hero.png)
 
-**Your life, rendered as sound.**
+<p align="center">
+  <a href="https://github.com/dhananjay-nautiyal/chronotone/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/dhananjay-nautiyal/chronotone/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="Java 21" src="https://img.shields.io/badge/Java-21-ffb454">
+  <img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-4ecdc4">
+  <img alt="Core: zero dependencies" src="https://img.shields.io/badge/core-zero--dependency-b388ff">
+</p>
 
 Chronotone turns a window of your digital life — commits, scrobbles, weather, steps — into an
 original, continuous piece of music. Scrub back to any moment and hear that exact moment again.
@@ -18,6 +23,33 @@ That one constraint changes what the project can be:
 | Content addressing | Every render has a `sha256`. Share the hash, keep the events private. |
 | Tamper-evident history | The log is a hash chain, and a **Merkle root** over any slice can be published while the events stay private. |
 | CI-verifiable art | Two renders of the same day must be byte-identical, and CI enforces it. |
+
+## A session
+
+`station` keeps a trailing window of the log and re-renders it as the clock moves. This is real
+output, not a mock-up:
+
+![A chronotone station session](docs/terminal.png)
+
+Every tick prints `timeline` and `wav` digests, and `verify` walks the whole hash chain. Both hashes
+are of artifacts you can reproduce byte for byte from the same log and seed.
+
+## One day, as music
+
+Five musical dimensions, sampled once per bar across a whole day. Every curve is a value the engine
+actually produced for the deterministic synthetic day (`seed 42`):
+
+![A day of Chronotone](docs/day.png)
+
+And this is what "listening live" means — a 30-minute window walking across that same day, with the
+window's own waveform below it:
+
+![A 30-minute station window walking across the day](docs/station.gif)
+
+The GIF is silent, which is a shame for an audio project — the Quickstart below plays the real thing.
+Every image on this page is generated from the engine's own output by
+[`docs/generate_assets.py`](docs/generate_assets.py); the charts use the synthetic day and never
+anyone's real log.
 
 ## Status
 

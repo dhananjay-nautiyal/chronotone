@@ -1,0 +1,10 @@
+$ chronotone station --log .chronotone/station-day.jsonl --window 30m \
+    --now 2026-10-19T22:14:00Z --seed 42 --follow --every 60s --ticks 2 --out out/station
+station    window PT30M | every PT1M | seed 42 | following
+log        .chronotone/station-day.jsonl   out out/station
+tick       2026-10-19T22:14:00.000Z  30 slots | 363 notes | 80.4 s | window 2026-10-19T21:44:00.000Z -> 2026-10-19T22:14:00.000Z | timeline 9f4f466cc726  wav 69a345dd1eb3
+tick       2026-10-19T22:15:00.000Z  30 slots | 361 notes | 79.9 s | window 2026-10-19T21:45:00.000Z -> 2026-10-19T22:15:00.000Z | timeline f71df604a028  wav 8c500d47ff58
+wrote      out/station/chronotone.wav, out/station/station.json
+
+$ chronotone verify --log .chronotone/station-day.jsonl
+OK  405 entries  head=d272cbbb61ae9bf175bb451de130e717836cfa2b23758953b0797e547cf811c7
