@@ -89,6 +89,20 @@ class MappingEvaluationTest {
     }
 
     @Test
+    void countReportsZeroForAnEmptyWindowAndClampsIntoOut() {
+        MappingSpec spec = new MappingParser().parse(DefaultMapping.YAML);
+        Map<String, Double> values = spec.evaluate(T0, List.of());
+
+        // Counting params treat an empty window as the measurement "zero", so they clamp to outMin.
+        assertEquals(72.0, values.get("tempo"), 1e-9);
+        assertEquals(0.0, values.get("hatDensity"), 1e-9);
+        // Field-reading params have genuinely missing data, so whenEmpty applies instead.
+        assertEquals(0.55, values.get("brightness"), 1e-9);
+        assertEquals(0.2, values.get("reverbWet"), 1e-9);
+        assertEquals(0.235, values.get("energy"), 1e-9);
+    }
+
+    @Test
     void busierWindowsNeverLowerTheTempo() {
         MappingSpec spec = new MappingParser().parse(DefaultMapping.YAML);
         double quiet = spec.evaluate(T0, List.of()).get("tempo");

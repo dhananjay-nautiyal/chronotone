@@ -53,7 +53,16 @@ public final class MappingParser {
         Aggregate aggregate = Aggregate.parse(node.get("aggregate"));
         double[] in = range(node.get("in"), "params." + name + ".in");
         double[] out = range(node.get("out"), "params." + name + ".out");
-        double whenEmpty = node.containsKey("whenEmpty") ? number(node.get("whenEmpty"), "params." + name + ".whenEmpty") : 0.0;
+        double whenEmpty = 0.0;
+        if (node.containsKey("whenEmpty")) {
+            if (!aggregate.readsPayloadField()) {
+                throw new MappingException("params." + name + ": 'whenEmpty' can never apply to a 'count'"
+                        + " aggregate — an empty window counts 0, which is a measurement rather than missing"
+                        + " data, so it clamps into 'out' like any other value. Set 'out' to control what zero"
+                        + " sounds like, or use sum/mean over a field if you need a distinct no-data value.");
+            }
+            whenEmpty = number(node.get("whenEmpty"), "params." + name + ".whenEmpty");
+        }
         return new ParamSpec(name, selector, window, aggregate, in[0], in[1], out[0], out[1], whenEmpty);
     }
 

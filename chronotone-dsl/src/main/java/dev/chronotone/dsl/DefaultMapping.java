@@ -18,13 +18,14 @@ public final class DefaultMapping {
             params:
 
               # Coding intensity drives the pulse.
+              # 'count' has no whenEmpty: an empty window counts 0, and 'out' decides what zero
+              # sounds like. The parser rejects whenEmpty here rather than silently ignoring it.
               tempo:
                 events: { source: git, type: commit }
                 window: 10m
                 aggregate: { kind: count }
                 in: [0, 8]
                 out: [72, 132]
-                whenEmpty: 0.0
 
               # Lines changed => how hard the track hits.
               energy:
@@ -44,14 +45,13 @@ public final class DefaultMapping {
                 out: [1.0, 0.25]
                 whenEmpty: 0.6
 
-              # What you are listening to fills the high end.
+              # What you are listening to fills the high end. Again 'count', so no whenEmpty.
               hatDensity:
                 events: { source: music, type: scrobble }
                 window: 10m
                 aggregate: { kind: count }
                 in: [0, 4]
                 out: [0.0, 0.9]
-                whenEmpty: 0.15
 
               # Movement adds space: a walk makes the room bigger.
               reverbWet:

@@ -91,6 +91,68 @@ class MappingParserTest {
     }
 
     @Test
+    void rejectsWhenEmptyOnACountAggregateBecauseItCouldNeverApply() {
+        MappingException error = assertThrows(MappingException.class, () -> new MappingParser().parse("""
+                mapping: v1.0
+                params:
+                  tempo:
+                    events: { source: git }
+                    window: 5m
+                    aggregate: { kind: count }
+                    in: [0, 8]
+                    out: [72, 132]
+                    whenEmpty: 0.5
+                """));
+        assertTrue(error.getMessage().contains("whenEmpty"));
+        assertTrue(error.getMessage().contains("count"));
+    }
+
+    @Test
+    void theOldDeadWhenEmptyLinesOnCountParamsAreNowRejected() {
+        // The shipping mapping used to carry `whenEmpty: 0.0` on tempo and `whenEmpty: 0.15` on
+        // hatDensity. Both are 'count' aggregates, so neither value could ever be read.
+        assertTrue(assertThrows(MappingException.class, () -> new MappingParser().parse("""
+                mapping: v1.0
+                params:
+                  hatDensity:
+                    events: { source: music, type: scrobble }
+                    window: 10m
+                    aggregate: { kind: count }
+                    in: [0, 4]
+                    out: [0.0, 0.9]
+                    whenEmpty: 0.15
+                """)).getMessage().contains("whenEmpty"));
+    }
+
+    @Test
+    void stillAcceptsWhenEmptyWhereItCanActuallyFire() {
+        MappingSpec spec = new MappingParser().parse("""
+                mapping: v1.0
+                params:
+                  brightness:
+                    events: { source: weather }
+                    window: 30m
+                    aggregate: { kind: mean, field: cloud_cover }
+                    in: [0, 1]
+                    out: [1, 0.25]
+                    whenEmpty: 0.6
+                """);
+        assertEquals(0.6, spec.params().get("brightness").whenEmpty());
+        assertTrue(spec.params().get("brightness").aggregate().readsPayloadField());
+    }
+
+    @Test
+    void everyParamInTheShippingMappingCanActuallyUseWhenEmpty() {
+        MappingSpec spec = new MappingParser().parse(DefaultMapping.YAML);
+        for (ParamSpec param : spec.params().values()) {
+            if (!param.aggregate().readsPayloadField()) {
+                assertEquals(0.0, param.whenEmpty(),
+                        "param '" + param.name() + "' is a count and cannot reach whenEmpty");
+            }
+        }
+    }
+
+    @Test
     void parsesCompactDurations() {
         assertEquals(Duration.ofSeconds(30), MappingParser.duration("30s"));
         assertEquals(Duration.ofMinutes(15), MappingParser.duration("15m"));

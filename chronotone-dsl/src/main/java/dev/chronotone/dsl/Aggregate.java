@@ -10,8 +10,13 @@ import java.util.Map;
  * How a window of events collapses into one number.
  *
  * <p>{@code count} needs no field; every other kind reads a numeric payload field and ignores
- * events that do not carry it. An empty window yields {@code NaN} — the mapping decides what "no
- * data" should sound like.
+ * events that do not carry it.
+ *
+ * <p>Missing data is not the same as zero activity. A field-reading kind yields {@code NaN} when no
+ * event in the window carries that field, and the mapping's {@code whenEmpty} decides what "no data"
+ * sounds like. {@code count} never yields {@code NaN}: an empty window is a real measurement of zero
+ * events, so it counts 0 and the {@code out} range decides what zero sounds like. See
+ * {@link #readsPayloadField()}.
  */
 public record Aggregate(Kind kind, String field) {
 
@@ -28,6 +33,16 @@ public record Aggregate(Kind kind, String field) {
 
     public static Aggregate count() {
         return new Aggregate(Kind.COUNT, null);
+    }
+
+    /**
+     * Whether this aggregate can report missing data by returning {@code NaN}. Only {@code count}
+     * cannot: it always has something to say, because "no events" is itself the answer (zero).
+     * A declared {@code whenEmpty} on such an aggregate would never apply, so the parser rejects it
+     * instead of ignoring it.
+     */
+    public boolean readsPayloadField() {
+        return kind != Kind.COUNT;
     }
 
     /** Accepts either {@code count} or {@code { kind: sum, field: lines_changed }}. */
