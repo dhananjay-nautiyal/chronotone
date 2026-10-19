@@ -60,6 +60,48 @@ jobs:
         env:
           JAR_ABS: ${{ github.workspace }}/chronotone-cli/target/chronotone-cli-0.1.0-SNAPSHOT.jar
 
+      - name: Prove the station round-trip
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+          # A fixed day so the window below is the same on every run.
+          java -jar "$JAR" demo --log .chronotone/station-day.jsonl --day 2026-10-19 --seed 42
+
+          # 1. A live frame must be byte-identical to a batch render of the same window.
+          java -jar "$JAR" station --log .chronotone/station-day.jsonl --window 30m \
+            --now 2026-10-19T13:00:00Z --seed 42 --out out/station
+          java -jar "$JAR" render --log .chronotone/station-day.jsonl --day 2026-10-19 \
+            --from 12:30 --minutes 30 --seed 42 --out out/station-ref >/dev/null
+          cmp out/station/chronotone.wav out/station-ref/chronotone.wav
+
+          # 2. Pinning --now makes the whole frame a pure function again.
+          java -jar "$JAR" station --log .chronotone/station-day.jsonl --window 30m \
+            --now 2026-10-19T13:00:00Z --seed 42 --out out/station2
+          diff out/station/station.json out/station2/station.json
+
+          # 3. Following the clock: three ticks one minute apart stream three closed slots.
+          java -jar "$JAR" station --log .chronotone/station-day.jsonl --window 30m \
+            --now 2026-10-19T13:00:00Z --seed 42 --out out/follow \
+            --follow --every 60s --ticks 3 --stream > out/stream.pcm 2> out/follow.log
+          grep -c "streamed 1 slot(s)" out/follow.log | grep -qx 3
+
+          # 4. ...and the last streamed block is the archival audio of that slot, byte for byte.
+          python3 - <<'PY'
+          import json
+          manifest = json.load(open("out/follow/station.json"))
+          bounds = manifest["slot_samples"]
+          slots = manifest["slots"]
+          with open("out/stream.pcm", "rb") as handle:
+              stream = handle.read()
+          with open("out/follow/chronotone.wav", "rb") as handle:
+              wav = handle.read()
+          chunk = (bounds[slots] - bounds[slots - 1]) * 2
+          streamed_last = stream[-chunk:]
+          archived = wav[44 + bounds[slots - 1] * 2 : 44 + bounds[slots] * 2]
+          assert len(stream) % 2 == 0 and len(stream) > 0, "stream is not 16-bit PCM"
+          assert streamed_last == archived, "the streamed slot is not the archived audio"
+          assert b"\x00" * 64 not in streamed_last, "the streamed slot looks silent"
+          PY
+
       - name: Upload the rendered day
         uses: actions/upload-artifact@v4
         with:
