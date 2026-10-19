@@ -5,6 +5,7 @@ import dev.chronotone.core.music.MusicalParams;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -13,6 +14,11 @@ import java.util.List;
  *
  * <p>Everything uses {@link StrictMath} and integer-indexed noise, so the same score yields the same
  * bytes on every machine — that is why the WAV can be hashed and published like any other artifact.
+ *
+ * <p>The pipeline is split into three stages on purpose: {@link #mix} builds the raw signal,
+ * {@link #normalize} sets its peak, and {@link #encode} packs it. Only the first two stages need the
+ * whole signal, and only the second needs a global peak — which is exactly why a live station can
+ * stream the mix ({@link StreamingSynth}) but must buffer a window before mastering it.
  */
 public final class WavRenderer {
 
@@ -21,34 +27,86 @@ public final class WavRenderer {
     public static final int BITS_PER_SAMPLE = 16;
     public static final int HEADER_BYTES = 44;
 
-    private static final double TAIL_SECONDS = 2.0;
+    /** Every render is normalised to this peak, so loud days and quiet ones stay comparable. */
+    public static final double PEAK = 0.89;
+
+    static final double TAIL_SECONDS = 2.0;
 
     private WavRenderer() {
     }
 
     public static byte[] toWav(Timeline timeline, List<NoteEvent> notes) {
-        int slots = timeline.size();
-        double[] slotStart = new double[slots + 1];
-        double[] secondsPerTick = new double[slots];
-        for (int i = 0; i < slots; i++) {
-            double secondsPerBar = secondsPerBar(timeline.params(i));
-            slotStart[i + 1] = slotStart[i] + secondsPerBar;
-            secondsPerTick[i] = secondsPerBar / ScoreBuilder.BAR_TICKS;
+        return encode(normalize(mix(timeline, notes), PEAK));
+    }
+
+    /** The raw, pre-normalisation signal. {@link StreamingSynth} must reproduce this exactly. */
+    public static double[] mix(Timeline timeline, List<NoteEvent> notes) {
+        Geometry geometry = geometry(timeline);
+        List<Placement> placements = placements(timeline, notes, geometry);
+        double[] buffer = new double[geometry.totalSamples()];
+        for (Placement placement : placements) {
+            addVoice(buffer, 0, timeline.params(placement.slot()), placement.note(),
+                    placement.startSeconds(), placement.durationSeconds());
         }
-
-        int sampleCount = (int) StrictMath.ceil((slotStart[slots] + TAIL_SECONDS) * SAMPLE_RATE);
-        double[] buffer = new double[sampleCount];
-
-        for (NoteEvent note : notes) {
-            int slot = (int) Math.min(slots - 1L, note.tick() / ScoreBuilder.BAR_TICKS);
-            double start = slotStart[slot] + (note.tick() - (long) slot * ScoreBuilder.BAR_TICKS) * secondsPerTick[slot];
-            double duration = note.durationTicks() * secondsPerTick[slot];
-            renderVoice(buffer, timeline.params(slot), note, start, duration);
-        }
-
         applySpace(buffer, meanReverb(timeline));
-        normalize(buffer);
-        return encode(buffer);
+        return buffer;
+    }
+
+    public static double[] normalize(double[] buffer, double peak) {
+        double loudest = 0.0;
+        for (double sample : buffer) {
+            loudest = Math.max(loudest, Math.abs(sample));
+        }
+        if (loudest < 1e-9) {
+            return buffer;
+        }
+        double scale = peak / loudest;
+        for (int i = 0; i < buffer.length; i++) {
+            buffer[i] *= scale;
+        }
+        return buffer;
+    }
+
+    public static byte[] encode(double[] buffer) {
+        int dataBytes = buffer.length * (BITS_PER_SAMPLE / 8);
+        ByteBuffer out = ByteBuffer.allocate(HEADER_BYTES + dataBytes).order(ByteOrder.LITTLE_ENDIAN);
+        out.put("RIFF".getBytes(StandardCharsets.US_ASCII));
+        out.putInt(36 + dataBytes);
+        out.put("WAVE".getBytes(StandardCharsets.US_ASCII));
+        out.put("fmt ".getBytes(StandardCharsets.US_ASCII));
+        out.putInt(16);
+        out.putShort((short) 1);
+        out.putShort((short) CHANNELS);
+        out.putInt(SAMPLE_RATE);
+        out.putInt(SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
+        out.putShort((short) (CHANNELS * (BITS_PER_SAMPLE / 8)));
+        out.putShort((short) BITS_PER_SAMPLE);
+        out.put("data".getBytes(StandardCharsets.US_ASCII));
+        out.putInt(dataBytes);
+        for (double sample : buffer) {
+            int value = (int) StrictMath.round(Math.clamp(sample, -1.0, 1.0) * 32_767.0);
+            out.putShort((short) value);
+        }
+        return out.array();
+    }
+
+    /** The WAV header alone, so a station can start writing before it knows the final length. */
+    public static byte[] header(int dataBytes) {
+        ByteBuffer out = ByteBuffer.allocate(HEADER_BYTES).order(ByteOrder.LITTLE_ENDIAN);
+        out.put("RIFF".getBytes(StandardCharsets.US_ASCII));
+        out.putInt(36 + dataBytes);
+        out.put("WAVE".getBytes(StandardCharsets.US_ASCII));
+        out.put("fmt ".getBytes(StandardCharsets.US_ASCII));
+        out.putInt(16);
+        out.putShort((short) 1);
+        out.putShort((short) CHANNELS);
+        out.putInt(SAMPLE_RATE);
+        out.putInt(SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
+        out.putShort((short) (CHANNELS * (BITS_PER_SAMPLE / 8)));
+        out.putShort((short) BITS_PER_SAMPLE);
+        out.put("data".getBytes(StandardCharsets.US_ASCII));
+        out.putInt(dataBytes);
+        return out.array();
     }
 
     public static double secondsOf(byte[] wav) {
@@ -56,14 +114,88 @@ public final class WavRenderer {
         return dataBytes / (double) (SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
     }
 
+    public static short toPcm(double sample) {
+        return (short) (int) StrictMath.round(Math.clamp(sample, -1.0, 1.0) * 32_767.0);
+    }
+
     /** One slot is one bar, so tempo decides how many real seconds a slot occupies. */
-    private static double secondsPerBar(MusicalParams params) {
+    static double secondsPerBar(MusicalParams params) {
         return ScoreBuilder.BEATS_PER_BAR * 60.0 / params.tempoBpm();
+    }
+
+    /**
+     * Sample geometry of a timeline: where each slot begins in samples, the length of the tail, and
+     * the total sample count. Shared so that a whole-buffer render and a block-by-block one cannot
+     * disagree about where a slot starts.
+     */
+    record Geometry(double[] slotStart, double[] secondsPerTick, int[] bounds, int totalSamples) {
+
+        int blocks() {
+            return bounds.length - 1;
+        }
+
+        /** The block that owns an absolute sample index. */
+        int blockOf(int sample) {
+            int low = 0;
+            int high = bounds.length - 2;
+            while (low < high) {
+                int mid = (low + high + 1) >>> 1;
+                if (bounds[mid] <= sample) {
+                    low = mid;
+                } else {
+                    high = mid - 1;
+                }
+            }
+            return low;
+        }
+    }
+
+    static Geometry geometry(Timeline timeline) {
+        int slots = timeline.size();
+        double[] slotStart = new double[slots + 1];
+        double[] secondsPerTick = new double[slots];
+        int[] bounds = new int[slots + 2];
+        for (int i = 0; i < slots; i++) {
+            double secondsPerBar = secondsPerBar(timeline.params(i));
+            slotStart[i + 1] = slotStart[i] + secondsPerBar;
+            secondsPerTick[i] = secondsPerBar / ScoreBuilder.BAR_TICKS;
+            bounds[i] = sampleAt(slotStart[i]);
+        }
+        bounds[slots] = sampleAt(slotStart[slots]);
+        int totalSamples = (int) StrictMath.ceil((slotStart[slots] + TAIL_SECONDS) * SAMPLE_RATE);
+        bounds[slots + 1] = totalSamples;
+        return new Geometry(slotStart, secondsPerTick, bounds, totalSamples);
+    }
+
+    /** Where one note sits in real time, and in which slot. */
+    record Placement(int slot, NoteEvent note, double startSeconds, double durationSeconds) {
+    }
+
+    static List<Placement> placements(Timeline timeline, List<NoteEvent> notes, Geometry geometry) {
+        int slots = timeline.size();
+        List<Placement> placements = new ArrayList<>(notes.size());
+        for (NoteEvent note : notes) {
+            int slot = (int) Math.min(slots - 1L, note.tick() / ScoreBuilder.BAR_TICKS);
+            double start = geometry.slotStart()[slot]
+                    + (note.tick() - (long) slot * ScoreBuilder.BAR_TICKS) * geometry.secondsPerTick()[slot];
+            double duration = note.durationTicks() * geometry.secondsPerTick()[slot];
+            placements.add(new Placement(slot, note, start, duration));
+        }
+        return placements;
+    }
+
+    static int sampleAt(double seconds) {
+        return (int) StrictMath.round(seconds * SAMPLE_RATE);
+    }
+
+    /** Samples a voice occupies, release included. */
+    static int voiceSamples(NoteEvent note, double durationSeconds) {
+        return (int) StrictMath.round((durationSeconds + release(timbreOf(note))) * SAMPLE_RATE);
     }
 
     private enum Timbre {PAD, BASS, LEAD, KICK, HAT}
 
-    private static Timbre timbreOf(NoteEvent note) {
+    static Timbre timbreOf(NoteEvent note) {
         if (note.channel() == 9) {
             return note.midiNote() == 36 ? Timbre.KICK : Timbre.HAT;
         }
@@ -74,30 +206,32 @@ public final class WavRenderer {
         };
     }
 
-    private static void renderVoice(double[] buffer, MusicalParams params, NoteEvent note,
-                                    double startSeconds, double durationSeconds) {
+    /**
+     * Adds one voice into {@code buffer}, where {@code buffer[0]} is absolute sample
+     * {@code bufferStartSample}. Voices are placed by absolute sample index and the hat's noise is
+     * keyed on the absolute index too, so rendering into a whole buffer or into blocks lands on
+     * identical samples.
+     */
+    static void addVoice(double[] buffer, int bufferStartSample, MusicalParams params, NoteEvent note,
+                         double startSeconds, double durationSeconds) {
         Timbre timbre = timbreOf(note);
         double amplitude = StrictMath.pow(note.velocity() / 127.0, 1.6) * gain(timbre);
         double release = release(timbre);
         double frequency = frequency(note.midiNote());
 
-        int startSample = (int) StrictMath.round(startSeconds * SAMPLE_RATE);
+        int startSample = sampleAt(startSeconds);
         int voiceSamples = (int) StrictMath.round((durationSeconds + release) * SAMPLE_RATE);
 
-        for (int i = 0; i < voiceSamples; i++) {
-            int index = startSample + i;
-            if (index < 0) {
-                continue;
-            }
-            if (index >= buffer.length) {
-                break;
-            }
-            double elapsed = (double) i / SAMPLE_RATE;
+        int first = Math.max(0, startSample - bufferStartSample);
+        int last = Math.min(buffer.length, startSample + voiceSamples - bufferStartSample);
+        for (int j = first; j < last; j++) {
+            int absolute = bufferStartSample + j;
+            double elapsed = (double) (absolute - startSample) / SAMPLE_RATE;
             double envelope = envelope(timbre, elapsed, durationSeconds);
             if (envelope <= 0.0) {
                 continue;
             }
-            buffer[index] += amplitude * envelope * waveform(timbre, frequency, elapsed, params, index);
+            buffer[j] += amplitude * envelope * waveform(timbre, frequency, elapsed, params, absolute);
         }
     }
 
@@ -179,7 +313,7 @@ public final class WavRenderer {
         return 440.0 * StrictMath.pow(2.0, (midiNote - 69) / 12.0);
     }
 
-    private static double meanReverb(Timeline timeline) {
+    static double meanReverb(Timeline timeline) {
         if (timeline.size() == 0) {
             return 0.0;
         }
@@ -191,54 +325,40 @@ public final class WavRenderer {
     }
 
     /** Two feedback combs: crude, cheap, fully deterministic, and enough to suggest a room. */
-    private static void applySpace(double[] buffer, double wet) {
+    static void applySpace(double[] buffer, double wet) {
         if (wet <= 0.001) {
             return;
         }
-        comb(buffer, (int) (0.037 * SAMPLE_RATE), 0.42 * wet);
-        comb(buffer, (int) (0.061 * SAMPLE_RATE), 0.34 * wet);
-    }
-
-    private static void comb(double[] buffer, int delay, double feedback) {
-        for (int i = delay; i < buffer.length; i++) {
-            buffer[i] += feedback * buffer[i - delay];
-        }
-    }
-
-    private static void normalize(double[] buffer) {
-        double peak = 0.0;
-        for (double sample : buffer) {
-            peak = Math.max(peak, Math.abs(sample));
-        }
-        if (peak < 1e-9) {
-            return;
-        }
-        double scale = 0.89 / peak;
+        Comb first = new Comb((int) (0.037 * SAMPLE_RATE), 0.42 * wet);
+        Comb second = new Comb((int) (0.061 * SAMPLE_RATE), 0.34 * wet);
         for (int i = 0; i < buffer.length; i++) {
-            buffer[i] *= scale;
+            buffer[i] = second.process(first.process(buffer[i]));
         }
     }
 
-    private static byte[] encode(double[] buffer) {
-        int dataBytes = buffer.length * (BITS_PER_SAMPLE / 8);
-        ByteBuffer out = ByteBuffer.allocate(HEADER_BYTES + dataBytes).order(ByteOrder.LITTLE_ENDIAN);
-        out.put("RIFF".getBytes(StandardCharsets.US_ASCII));
-        out.putInt(36 + dataBytes);
-        out.put("WAVE".getBytes(StandardCharsets.US_ASCII));
-        out.put("fmt ".getBytes(StandardCharsets.US_ASCII));
-        out.putInt(16);
-        out.putShort((short) 1);
-        out.putShort((short) CHANNELS);
-        out.putInt(SAMPLE_RATE);
-        out.putInt(SAMPLE_RATE * CHANNELS * (BITS_PER_SAMPLE / 8));
-        out.putShort((short) (CHANNELS * (BITS_PER_SAMPLE / 8)));
-        out.putShort((short) BITS_PER_SAMPLE);
-        out.put("data".getBytes(StandardCharsets.US_ASCII));
-        out.putInt(dataBytes);
-        for (double sample : buffer) {
-            int value = (int) StrictMath.round(Math.clamp(sample, -1.0, 1.0) * 32_767.0);
-            out.putShort((short) value);
+    /**
+     * A delay line with feedback. Causal, so it can run across block boundaries as long as the state
+     * is carried — which is what lets the live synth sound exactly like the batch one.
+     */
+    static final class Comb {
+
+        private final double[] line;
+        private final double feedback;
+        private int cursor;
+
+        Comb(int delay, double feedback) {
+            this.line = new double[delay];
+            this.feedback = feedback;
         }
-        return out.array();
+
+        double process(double sample) {
+            double out = sample + feedback * line[cursor];
+            line[cursor] = out;
+            cursor++;
+            if (cursor == line.length) {
+                cursor = 0;
+            }
+            return out;
+        }
     }
 }
