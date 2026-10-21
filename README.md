@@ -53,7 +53,7 @@ anyone's real log.
 
 ## Status
 
-Phases 1–4 of the roadmap are complete and working:
+Phases 1–5 of the roadmap are complete and working:
 
 - Append-only, tamper-evident **event log** (canonical JSON + hash chain, zero dependencies)
 - **Connector SPI** plus a deterministic synthetic connector for demos and CI
@@ -69,6 +69,8 @@ Phases 1–4 of the roadmap are complete and working:
 - **Live station mode**: the trailing window is re-rendered as the clock moves, by an incremental
   synth that is sample-exact with the batch one — a live frame is byte-identical to the render of
   the same window, and it can stream straight into a player
+- **Player**: a Kotlin Multiplatform navigator that seeks a rendered frame by the engine's published
+  sample offsets — a Swing desktop player and a Compose Android app — and never reads your event log
 - **Timeline fingerprint**, `sha256` of the MIDI and WAV, and a chain `verify` command
 - CLI: `init`, `demo`, `sync`, `render`, `station`, `commit`, `prove`, `check`, `verify`
 
@@ -170,6 +172,53 @@ java -jar "$JAR" render --from 07:00 --minutes 100 --out out
 java -jar "$JAR" verify
 ```
 
+## The player
+
+![The Chronotone player, seeking inside a rendered half hour](docs/player.png)
+
+The player is a **navigator, not a second synthesizer**.
+
+Porting the synth to Kotlin would mean two implementations that must agree forever, and the
+determinism contract is the one thing this project cannot afford to fork. So the phone is given two
+files — `chronotone.wav` and `station.json` — and nothing else. It never sees the event log, the
+mapping, or a timestamp of your life.
+
+Seeking is exact because the engine publishes where every bar begins:
+
+```
+slot_samples[0 .. slots+1]   # start of each bar, then the last bar's end, then the tail's end
+```
+
+Click the waveform and the player maps that instant to the bar containing it and starts at
+`slot_samples[bar]` — the engine's own sample offset, not a re-derived tempo. The readout names the
+field it used, so the claim is checkable while you listen.
+
+```bash
+cd player
+
+# Desktop reference player (Swing, nothing beyond the JDK)
+./gradlew :desktopApp:run --args="--station ../out/station"
+
+# Paint it without a display — the same code the window runs
+./gradlew :desktopApp:run --args="--station ../out/station --slot 23 --screenshot player.png"
+
+# Android: build, install, then push a frame to the device
+./gradlew :androidApp:assembleDebug
+adb install androidApp/build/outputs/apk/debug/androidApp-debug.apk
+adb push ../out/station/station.json   /sdcard/Android/data/dev.chronotone.player/files/frame/
+adb push ../out/station/chronotone.wav /sdcard/Android/data/dev.chronotone.player/files/frame/
+```
+
+`shared` is Kotlin Multiplatform (`jvm` + `androidTarget`); the file and PCM layer sits in a
+`jvmSharedMain` source set that both UIs consume, so "read a frame from disk" exists once. The module
+has no dependencies — its JSON reader, ISO-8601 handling and seek math are its own — and the manifest
+parser is strict on purpose: a frame whose boundaries do not add up is refused rather than
+half-played.
+
+CI checks the two languages against each other on every run. It regenerates the frame that
+`player/shared/src/jvmTest/resources/station.json` came from, `diff`s the manifest byte for byte, then
+runs the Kotlin tests over it. If the renderer's geometry ever moves, the player's fixture fails.
+
 ## Connectors
 
 A connector turns one source of your life into events. Adding a source is a config entry, not code.
@@ -252,6 +301,7 @@ so a day has its own tonal identity. See `chronotone-dsl/src/main/java/dev/chron
 | `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth, incremental `StreamingSynth`, live `Station` | core, dsl |
 | `chronotone-connectors` | git history, CSV/JSONL exports, Open-Meteo weather, incremental sync | core, SnakeYAML |
 | `chronotone-cli` | `init` / `demo` / `sync` / `render` / `station` / `commit` / `prove` / `check` / `verify` | all |
+| `player/` | Kotlin Multiplatform player: manifest contract, seek math, headless screenshot, Swing + Compose UIs | **none** in `shared` |
 
 ## Determinism rules
 
@@ -276,7 +326,7 @@ window. Pin `--now` and everything downstream is a pure function of the inputs a
 | **2** | Real connectors (git, CSV/JSONL exports, Open-Meteo weather), incremental idempotent sync | ✅ |
 | **3** | Merkle commitments: publish a root, prove inclusion, verify without the log | ✅ |
 | **4** | Live station mode: an incremental, sample-exact synth; a rolling window rendered as the clock moves; raw-PCM streaming | ✅ |
-| 5 | Android/KMP player with timeline scrubbing | next |
+| **5** | Android/KMP player with timeline scrubbing | ✅ |
 | 6 | Monthly album export: stems, mastering, generative cover art, share card | planned |
 
 Phase 4 deliberately stops short of "commit the day" — the day-level commitment is already `commit`,
@@ -298,6 +348,11 @@ Merkle commitments close the biggest gap, but not every one. Still true today:
 - **A station is a rolling window, not a gapless stream.** It re-masters its window on each tick and
   emits every closed slot once, so the blocks are sample-exact but gain is normalised per window and
   can step slightly from tick to tick. The master of a whole day is still `chronotone render`.
+- **The player plays; it does not render.** A frame is produced by the CLI and copied to the device.
+  Rendering on the phone would mean a second engine to keep in agreement, which is exactly what the
+  design avoids — so the phone holds audio and a manifest, never an event.
+- **The Android app is compiled in CI, not run.** There is no emulator in the pipeline: the screen is
+  covered by the shared tests and the desktop paint test, not by a device test.
 - **A station cannot hear the future.** A slot is played once it closes, so an event that arrives
   later is not retroactively inserted into what you already heard. Re-rendering the same `--now`
   does include it, because a frame is a pure function of the log.
