@@ -38,17 +38,13 @@ class PlayerPanel(
         timeline.startOfSlot(startSlot.coerceIn(0, timeline.slotCount - 1)).toLong()
 
     private val clock = Timer(40) {
-        if (audio != null && audio.isPlaying) {
-            position = audio.positionSamples
-            repaint()
-        } else if (audio != null && !audio.isPlaying && tickWanted) {
-            tickWanted = false
+        // Only the playing thread may move the playhead; a seek while paused must stick.
+        val sound = audio
+        if (sound != null && sound.isPlaying) {
+            position = sound.positionSamples
             repaint()
         }
     }
-
-    @Volatile
-    private var tickWanted = false
 
     private var playButton = java.awt.Rectangle()
 
@@ -85,7 +81,6 @@ class PlayerPanel(
         } else {
             sound.play(position)
         }
-        tickWanted = true
         repaint()
     }
 

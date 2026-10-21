@@ -16,34 +16,41 @@ class AudioPlayer(private val wav: WavFile) : AutoCloseable {
 
     private val format = AudioFormat(wav.format.sampleRate.toFloat(), 16, 1, true, false)
 
-    @Volatile
-    private var line: SourceDataLine? = null
+    /**
+     * One play-through.
+     *
+     * The stop flag lives on the playback, not on the player: pressing play twice quickly must not
+     * let a thread that is slow to unwind cancel the one that replaced it.
+     */
+    private class Playback {
+        @Volatile var stopRequested = false
+        @Volatile var finished = false
+        @Volatile var line: SourceDataLine? = null
+        var thread: Thread? = null
+    }
 
-    @Volatile
-    private var worker: Thread? = null
-
-    @Volatile
-    private var running = false
+    private var current: Playback? = null
 
     @Volatile
     var positionSamples: Long = 0
         private set
 
-    val isPlaying: Boolean get() = running
+    val isPlaying: Boolean get() = current?.let { !it.finished } == true
 
     fun play(fromSample: Long) {
         stop()
-        positionSamples = fromSample
-        running = true
 
-        worker = thread(isDaemon = true, name = "chronotone-audio") {
+        val playback = Playback().also { current = it }
+        positionSamples = fromSample
+
+        playback.thread = thread(isDaemon = true, name = "chronotone-audio") {
             val opened = AudioSystem.getSourceDataLine(format)
+            playback.line = opened
             try {
                 opened.open(format)
                 opened.start()
-                line = opened
                 var at = fromSample
-                while (running && at < wav.samples) {
+                while (!playback.stopRequested && at < wav.samples) {
                     val count = minOf(4096L, wav.samples - at).toInt()
                     val bytes = wav.read(at, count)
                     opened.write(bytes, 0, bytes.size)
@@ -53,19 +60,20 @@ class AudioPlayer(private val wav: WavFile) : AutoCloseable {
             } finally {
                 runCatching { opened.stop() }
                 runCatching { opened.close() }
-                running = false
+                playback.line = null
+                playback.finished = true
             }
         }
     }
 
     fun stop() {
-        running = false
-        runCatching { line?.stop() }
-        runCatching { line?.flush() }
-        runCatching { line?.close() }
-        line = null
-        worker?.join(250)
-        worker = null
+        val playback = current ?: return
+        current = null
+        playback.stopRequested = true
+        runCatching { playback.line?.stop() }
+        runCatching { playback.line?.flush() }
+        runCatching { playback.line?.close() }
+        playback.thread?.join(250)
     }
 
     override fun close() = stop()

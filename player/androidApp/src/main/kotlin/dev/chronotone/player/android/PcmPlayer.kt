@@ -16,27 +16,29 @@ import kotlin.concurrent.thread
  */
 class PcmPlayer(private val frame: StationFrame) : Closeable {
 
-    @Volatile
-    private var track: AudioTrack? = null
+    /** One play-through; see `AudioPlayer` on the desktop for why the flag is not on the player. */
+    private class Playback {
+        @Volatile var stopRequested = false
+        @Volatile var finished = false
+        @Volatile var track: AudioTrack? = null
+        var thread: Thread? = null
+    }
 
-    @Volatile
-    private var worker: Thread? = null
-
-    @Volatile
-    private var running = false
+    private var current: Playback? = null
 
     @Volatile
     var positionSamples: Long = 0
         private set
 
-    val isPlaying: Boolean get() = running
+    val isPlaying: Boolean get() = current?.let { !it.finished } == true
 
     fun play(fromSample: Long) {
         stop()
-        positionSamples = fromSample
-        running = true
 
-        worker = thread(isDaemon = true, name = "chronotone-audio") {
+        val playback = Playback().also { current = it }
+        positionSamples = fromSample
+
+        playback.thread = thread(isDaemon = true, name = "chronotone-audio") {
             val minimum = AudioTrack.getMinBufferSize(
                 frame.wav.format.sampleRate,
                 AudioFormat.CHANNEL_OUT_MONO,
@@ -61,11 +63,11 @@ class PcmPlayer(private val frame: StationFrame) : Closeable {
                 .setBufferSizeInBytes(maxOf(minimum * 2, 16_384))
                 .build()
 
+            playback.track = opened
             try {
                 opened.play()
-                track = opened
                 var at = fromSample
-                while (running && at < frame.wav.samples) {
+                while (!playback.stopRequested && at < frame.wav.samples) {
                     val count = minOf(4096L, frame.wav.samples - at).toInt()
                     val bytes = frame.wav.read(at, count)
                     val written = opened.write(bytes, 0, bytes.size)
@@ -76,19 +78,20 @@ class PcmPlayer(private val frame: StationFrame) : Closeable {
             } finally {
                 runCatching { opened.stop() }
                 runCatching { opened.release() }
-                running = false
+                playback.track = null
+                playback.finished = true
             }
         }
     }
 
     fun stop() {
-        running = false
-        runCatching { track?.pause() }
-        runCatching { track?.flush() }
-        runCatching { track?.release() }
-        track = null
-        worker?.join(250)
-        worker = null
+        val playback = current ?: return
+        current = null
+        playback.stopRequested = true
+        runCatching { playback.track?.pause() }
+        runCatching { playback.track?.flush() }
+        runCatching { playback.track?.release() }
+        playback.thread?.join(250)
     }
 
     override fun close() = stop()
