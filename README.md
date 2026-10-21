@@ -151,6 +151,8 @@ java -jar "$JAR" album --log .chronotone/demo.jsonl --month 2026-10 --stems
 java -jar "$JAR" album --from 2026-10-19 --days 5 --start 07:00 --window 10m --stems
 ```
 
+Five synthetic days (seeds 42–46), ten minutes of each morning, with stems:
+
 ```
 album      chronotone.album/1
 range      2026-10-19 .. 2026-10-23  (5 days requested)
