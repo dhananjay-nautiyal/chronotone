@@ -7,3 +7,10 @@ out/
 *.iml
 .vscode/
 .DS_Store
+
+# The player is a separate Gradle build; its output and the machine-specific SDK path stay out.
+player/.gradle/
+player/.kotlin/
+player/build/
+player/**/build/
+player/local.properties

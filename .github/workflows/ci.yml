@@ -102,6 +102,21 @@ jobs:
           assert b"\x00" * 64 not in streamed_last, "the streamed slot looks silent"
           PY
 
+      - name: Build and test the player
+        working-directory: player
+        run: ./gradlew --no-daemon :shared:jvmTest :desktopApp:test :androidApp:assembleDebug
+
+      - name: Prove the player agrees with the engine
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+
+          # Regenerate the exact frame the player's fixture came from. The engine is deterministic,
+          # so this is a byte-for-byte diff, not a "close enough" comparison.
+          java -jar "$JAR" demo --log .chronotone/station-day.jsonl --day 2026-10-19 --seed 42
+          java -jar "$JAR" station --log .chronotone/station-day.jsonl --window 30m \
+            --now 2026-10-19T22:14:00Z --seed 42 --out out/fixture-check
+          diff -u player/shared/src/jvmTest/resources/station.json out/fixture-check/station.json
+
       - name: Upload the rendered day
         uses: actions/upload-artifact@v4
         with:
