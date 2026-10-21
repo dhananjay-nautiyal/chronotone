@@ -18,9 +18,11 @@ import dev.chronotone.dsl.DefaultMapping;
 import dev.chronotone.dsl.MappingParser;
 import dev.chronotone.dsl.MappingSpec;
 import dev.chronotone.dsl.ParamSpec;
+import dev.chronotone.render.Album;
 import dev.chronotone.render.Chronotone;
 import dev.chronotone.render.RenderResult;
 import dev.chronotone.render.Station;
+import dev.chronotone.render.WavRenderer;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -29,6 +31,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.YearMonth;
 import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -68,6 +71,7 @@ public final class Main {
                 case "demo" -> demo(options);
                 case "sync" -> sync(options);
                 case "render" -> render(options);
+                case "album" -> album(options);
                 case "station" -> station(options);
                 case "commit" -> commit(options);
                 case "prove" -> prove(options);
@@ -199,6 +203,100 @@ public final class Main {
                 + out.resolve("chronotone.wav") + ", " + out.resolve("chronotone.json"));
         System.out.println();
         System.out.println("render again with the same arguments: the hashes must not change.");
+    }
+
+    /**
+     * A month as an album: one track per day, one gain for the whole thing.
+     *
+     * <p>{@code render} masters a single window; {@code station} masters a rolling one. Neither can
+     * master a month, because both have to decide a gain before the material exists. This command
+     * renders every day first, finds the album's peak, and only then scales — so the quiet days stay
+     * quiet and the loud ones stay loud, which is the whole point of mastering an album instead of a
+     * folder of clips.
+     *
+     * <p>{@code --stems} writes each day's five voices separately (pad, bass, lead, kick, hat), at the
+     * same gain, so a stem set sums back to its track.
+     */
+    private static void album(Map<String, String> options) throws IOException {
+        Path log = Path.of(options.getOrDefault("log", DEFAULT_LOG));
+        Path out = Path.of(options.getOrDefault("out", "out/album"));
+        long seed = Long.parseLong(options.getOrDefault("seed", "42"));
+        LocalTime dayStart = LocalTime.parse(options.getOrDefault("start", "00:00"));
+        Duration window = parseDuration(options.getOrDefault("window", "24h"));
+        boolean stems = options.containsKey("stems");
+
+        if (!Files.exists(log)) {
+            throw new IllegalStateException("no log at " + log
+                    + " — run `chronotone demo` or `chronotone sync` first");
+        }
+        List<LoggedEvent> ledger = EventLog.readEntries(log);
+        if (ledger.isEmpty()) {
+            throw new IllegalStateException("no entries in " + log + " — run `chronotone demo` first");
+        }
+
+        LocalDate from;
+        int days;
+        if (options.containsKey("month")) {
+            YearMonth month = YearMonth.parse(options.get("month"));
+            from = month.atDay(1);
+            days = month.lengthOfMonth();
+        } else if (options.containsKey("from")) {
+            from = LocalDate.parse(options.get("from"));
+            days = Integer.parseInt(options.getOrDefault("days", "1"));
+        } else {
+            LocalDate first = ledger.getFirst().event().timestamp()
+                    .atZone(ZoneOffset.UTC).toLocalDate();
+            YearMonth month = YearMonth.from(first);
+            from = month.atDay(1);
+            days = month.lengthOfMonth();
+        }
+
+        MappingSpec mapping = new MappingParser().parse(mappingYaml(options));
+        Album.Result result = Album.render(mapping, ledger, from, days, dayStart, window, seed, out, stems);
+
+        Files.createDirectories(out);
+        Files.writeString(out.resolve("album.json"),
+                CanonicalJson.write(result.toManifest(mapping, seed, from, days, dayStart, window)));
+
+        System.out.println("album      " + Album.FORMAT);
+        System.out.println("range      " + from + " .. " + from.plusDays(days - 1)
+                + "  (" + days + " days requested)");
+        System.out.println("window     " + dayStart + " + " + window + " per day");
+        System.out.println("mapping    " + mapping.version() + " (" + mapping.paramNames() + ")");
+        System.out.println("tracks     " + result.days() + " with sound"
+                + (result.emptyDays().isEmpty() ? "" : ", " + result.emptyDays().size()
+                + " empty and skipped"));
+        System.out.println("mastering  one gain for the album, peak " + WavRenderer.PEAK);
+        System.out.println("audio      " + clock(result.seconds()) + " at 44.1 kHz / 16-bit / mono");
+        System.out.println();
+        for (Album.Track track : result.tracks()) {
+            System.out.printf("%s  %5d events  %5d bars  %6d notes  %s  %s  root %s%n",
+                    track.day(), track.events(), track.slots(), track.notes(),
+                    clock(track.seconds()), shortHash(track.wavHash()), shortHash(track.merkleRoot()));
+        }
+        System.out.println();
+        if (stems) {
+            System.out.println("stems      " + String.join(", ", Album.STEMS.keySet())
+                    + " per track, same gain as the album");
+        }
+        System.out.println("wrote      " + out.resolve("album.json") + ", "
+                + out.resolve("tracks") + " (" + result.days() + " files)"
+                + (stems ? ", " + out.resolve("stems") : ""));
+        System.out.println();
+        System.out.println("render again with the same arguments: every track hash must not change.");
+    }
+
+    private static String clock(double seconds) {
+        long millis = StrictMath.round(seconds * 1000.0);
+        long h = millis / 3_600_000;
+        long m = (millis / 60_000) % 60;
+        long s = (millis / 1000) % 60;
+        long ms = millis % 1000;
+        return String.format(Locale.ROOT, "%d:%02d:%02d.%03d", h, m, s, ms);
+    }
+
+    private static String shortHash(String hash) {
+        return hash.substring(0, 12);
     }
 
     /**
@@ -590,6 +688,9 @@ public final class Main {
                   chronotone sync    [--config <file>] [--log <file>] [--from <iso>] [--to <iso>] [--dry-run]
                   chronotone render  [--log <file>] [--out <dir>] [--day <yyyy-MM-dd>]
                                      [--from <HH:mm>] [--minutes <n>] [--seed <n>] [--mapping <file>]
+                  chronotone album   [--log <file>] [--out <dir>] [--month <yyyy-MM>]
+                                     [--from <yyyy-MM-dd> --days <n>] [--start <HH:mm>]
+                                     [--window <dur>] [--stems] [--seed <n>] [--mapping <file>]
                   chronotone station [--log <file>] [--out <dir>] [--mapping <file>] [--seed <n>]
                                      [--window <dur>] [--now <iso>] [--follow] [--every <dur>]
                                      [--ticks <n>] [--stream]
@@ -613,6 +714,10 @@ public final class Main {
                   chronotone sync --config .chronotone/connectors.yaml --dry-run
                   chronotone sync --config .chronotone/connectors.yaml
                   chronotone render --from 21:00 --minutes 24 --out out
+
+                publishing a month as an album:
+                  chronotone album --month 2026-10 --seed 42
+                  chronotone album --month 2026-10 --stems            # + pad/bass/lead/kick/hat
 
                 publishing a hash without publishing your day:
                   chronotone commit --day 2026-10-19 --out out/commitment.json

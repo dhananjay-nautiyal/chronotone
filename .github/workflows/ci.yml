@@ -102,6 +102,47 @@ jobs:
           assert b"\x00" * 64 not in streamed_last, "the streamed slot looks silent"
           PY
 
+      - name: Prove the album masters a month as one thing
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+          java -jar "$JAR" demo --log .chronotone/album-month.jsonl --day 2026-10-19 --seed 42
+
+          # Two days requested, one with no entries: the empty day is recorded, not rendered.
+          java -jar "$JAR" album --log .chronotone/album-month.jsonl \
+            --from 2026-10-19 --days 2 --start 07:00 --window 30m \
+            --seed 42 --out out/album-a --stems
+          java -jar "$JAR" album --log .chronotone/album-month.jsonl \
+            --from 2026-10-19 --days 2 --start 07:00 --window 30m \
+            --seed 42 --out out/album-b --stems
+
+          # Same inputs, same tracks: no wall clock, no machine state in the manifest.
+          cmp out/album-a/album.json out/album-b/album.json
+          cmp out/album-a/tracks/2026-10-19.wav out/album-b/tracks/2026-10-19.wav
+
+          python3 - <<'PY'
+          import json, struct, wave
+
+          manifest = json.load(open("out/album-a/album.json"))
+          assert manifest["format"] == "chronotone.album/1"
+          assert [t["day"] for t in manifest["tracks"]] == ["2026-10-19"]
+          assert manifest["empty_days"] == ["2026-10-20"]
+          assert manifest["mastered"] == "album"
+
+          def pcm(path):
+              with wave.open(path, "rb") as w:
+                  return struct.unpack("<%dh" % w.getnframes(), w.readframes(w.getnframes()))
+
+          track = pcm("out/album-a/tracks/2026-10-19.wav")
+          stems = [pcm("out/album-a/stems/2026-10-19/%s.wav" % name)
+                   for name in ("pad", "bass", "lead", "kick", "hat")]
+
+          # One gain for the album: the loudest sample of the loudest day is the album peak.
+          assert max(abs(s) for s in track) == round(0.89 * 32767)
+          # Stems are the same audio split by voice: they add back up to the track.
+          worst = max(abs(sum(v) - t) for t, *v in zip(track, *stems))
+          assert worst <= len(stems), worst
+          PY
+
       - name: Build and test the player
         working-directory: player
         run: ./gradlew --no-daemon :shared:jvmTest :desktopApp:test :androidApp:assembleDebug

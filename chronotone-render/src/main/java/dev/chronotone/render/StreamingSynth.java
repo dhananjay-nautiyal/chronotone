@@ -32,9 +32,21 @@ public final class StreamingSynth {
     private int cursor;
 
     public StreamingSynth(Timeline timeline, List<NoteEvent> notes) {
+        this(timeline, notes, null);
+    }
+
+    /**
+     * The same synth over one stem only — every voice of a single timbre, with the same space applied
+     * to that stem alone. Because the reverb is two linear filters, the stems of a day add back up to
+     * the day's mix (up to floating-point rounding), which is what makes a stem export honest.
+     */
+    StreamingSynth(Timeline timeline, List<NoteEvent> notes, WavRenderer.Timbre only) {
         this.timeline = timeline;
         this.geometry = WavRenderer.geometry(timeline);
-        this.placements = WavRenderer.placements(timeline, notes, geometry);
+        List<NoteEvent> selected = only == null
+                ? notes
+                : notes.stream().filter(note -> WavRenderer.timbreOf(note) == only).toList();
+        this.placements = WavRenderer.placements(timeline, selected, geometry);
         this.voicesByBlock = new ArrayList<>(geometry.blocks());
         for (int i = 0; i < geometry.blocks(); i++) {
             voicesByBlock.add(new ArrayList<>());
