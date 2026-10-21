@@ -193,7 +193,7 @@ public final class WavRenderer {
         return (int) StrictMath.round((durationSeconds + release(timbreOf(note))) * SAMPLE_RATE);
     }
 
-    private enum Timbre {PAD, BASS, LEAD, KICK, HAT}
+    enum Timbre {PAD, BASS, LEAD, KICK, HAT}
 
     static Timbre timbreOf(NoteEvent note) {
         if (note.channel() == 9) {

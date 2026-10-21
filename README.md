@@ -53,7 +53,7 @@ anyone's real log.
 
 ## Status
 
-Phases 1–5 of the roadmap are complete and working:
+Phases 1–5 and 6a of the roadmap are complete and working:
 
 - Append-only, tamper-evident **event log** (canonical JSON + hash chain, zero dependencies)
 - **Connector SPI** plus a deterministic synthetic connector for demos and CI
@@ -71,8 +71,10 @@ Phases 1–5 of the roadmap are complete and working:
   the same window, and it can stream straight into a player
 - **Player**: a Kotlin Multiplatform navigator that seeks a rendered frame by the engine's published
   sample offsets — a Swing desktop player and a Compose Android app — and never reads your event log
+- **Album export**: a month of days as one mastered album — a single gain across every track, five
+  stems per day, and a manifest that carries each day's Merkle root
 - **Timeline fingerprint**, `sha256` of the MIDI and WAV, and a chain `verify` command
-- CLI: `init`, `demo`, `sync`, `render`, `station`, `commit`, `prove`, `check`, `verify`
+- CLI: `init`, `demo`, `sync`, `render`, `album`, `station`, `commit`, `prove`, `check`, `verify`
 
 ## Quickstart
 
@@ -130,7 +132,73 @@ byte-identical to the batch render of the window that produced it. Status lines 
 stdout stays pure PCM. With `--now` pinned, `--follow --every 60s --ticks 3` is a deterministic
 three-frame run — which is exactly how CI exercises it.
 
+### A month, as an album
+
+A day is a track; a month is an album. The difference is not the file count — it is that an album is
+mastered as a whole. `render` and `station` have to pick a gain before their material has finished
+existing, so each masters its own window. An album knows all of its days before it writes any of
+them, so it renders them twice: once to find the month's peak, once to write, scaling every track by
+that same factor.
+
+```bash
+# Every day of the month is a track (days with no entries are listed, not rendered)
+java -jar "$JAR" album --log .chronotone/demo.jsonl --month 2026-10 --seed 42 --out out/album
+
+# The same album plus five stems per track: pad, bass, lead, kick, hat
+java -jar "$JAR" album --log .chronotone/demo.jsonl --month 2026-10 --stems
+
+# An album of mornings, or of a few days — --window and --start shape each day
+java -jar "$JAR" album --from 2026-10-19 --days 5 --start 07:00 --window 10m --stems
+```
+
+Five synthetic days (seeds 42–46), ten minutes of each morning, with stems:
+
+```
+album      chronotone.album/1
+range      2026-10-19 .. 2026-10-23  (5 days requested)
+window     07:00 + PT10M per day
+mapping    v1.0 ([tempo, energy, brightness, hatDensity, reverbWet])
+tracks     5 with sound
+mastering  one gain for the album, peak 0.89
+audio      0:02:51.161 at 44.1 kHz / 16-bit / mono
+
+2026-10-19      3 events     10 bars      90 notes  0:00:35.333  8fe9ccb7ad25  root 1d7c71c1eb8c
+2026-10-20      3 events     10 bars     100 notes  0:00:35.333  7707f4123a2e  root f4bb46d072df
+2026-10-21      4 events     10 bars     110 notes  0:00:35.333  145004deb60b  root c0aa03a03385
+2026-10-22      5 events     10 bars     110 notes  0:00:29.828  c5d1bda5d032  root 1abe07114328
+2026-10-23      3 events     10 bars      90 notes  0:00:35.333  5b9f1702bf16  root bb94746ff8e5
+
+stems      pad, bass, lead, kick, hat per track, same gain as the album
+wrote      out/album/album.json, out/album/tracks (5 files), out/album/stems
+```
+
+```
+out/album/
+  album.json               # the manifest: one entry per day, each with its Merkle root
+  tracks/2026-10-19.wav    # a day, at the album's gain
+  stems/2026-10-19/        # pad.wav, bass.wav, lead.wav, kick.wav, hat.wav
+```
+
+What makes it an album rather than a folder:
+
+- **One gain.** The album's loudest sample is exactly the album peak (`0.89` of full scale) and every
+  track is scaled by the same factor, so a quiet Tuesday stays quieter than a loud Saturday. CI asserts
+  that peak and, in the tests, that a one-day album is byte-identical to `render` of the same window.
+- **Each track closes its day.** Every entry in `album.json` carries the Merkle root and chain head of
+  the log entries that track was made from. Publishing an album publishes a commitment to the whole
+  month, track by track, without publishing a single event.
+- **Stems add back up.** The five voices are rendered separately, each with the day's reverb applied to
+  that stem alone. Reverb is linear, so the stems sum back to the track to within one
+  least-significant bit per stem — no hidden voice, no invented residual.
+- **Nothing holds a month in memory.** Each day is synthesised block by block by `StreamingSynth`;
+  only the block being written exists at any moment. Days with no entries are skipped and named under
+  `empty_days` in the manifest.
+- **The cost is honest.** A day compresses 24:1, so a full-day track is about an hour of audio
+  (~340 MB of uncompressed WAV) and a 31-day album is ~33 hours and ~10 GB. That is why `--window`
+  exists: "the mornings" is a smaller, and often better, album.
+
 ### Commitments
+
 
 The chain and the Merkle tree answer different questions. The chain proves *nothing in this log was
 edited*, but checking it needs every byte. A commitment lets you publish a root and later prove one
@@ -298,9 +366,9 @@ so a day has its own tonal identity. See `chronotone-dsl/src/main/java/dev/chron
 | --- | --- | --- |
 | `chronotone-core` | `Event`, canonical JSON, JSON reader, hash chain, `EventLog`, Merkle tree/proofs/commitments, connector SPI | **none** |
 | `chronotone-dsl` | Mapping DSL: parse, validate, evaluate | core, SnakeYAML |
-| `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth, incremental `StreamingSynth`, live `Station` | core, dsl |
+| `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth, incremental `StreamingSynth`, live `Station`, album mastering | core, dsl |
 | `chronotone-connectors` | git history, CSV/JSONL exports, Open-Meteo weather, incremental sync | core, SnakeYAML |
-| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `station` / `commit` / `prove` / `check` / `verify` | all |
+| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `album` / `station` / `commit` / `prove` / `check` / `verify` | all |
 | `player/` | Kotlin Multiplatform player: manifest contract, seek math, headless screenshot, Swing + Compose UIs | **none** in `shared` |
 
 ## Determinism rules
@@ -318,6 +386,10 @@ decides *when* samples are produced, never which samples they are.
 `station` is the one command that reads the clock, and it reads it for a single purpose: choosing the
 window. Pin `--now` and everything downstream is a pure function of the inputs again.
 
+Album mastering adds no new state either. The gain is the peak of the same day mixes the tracks are
+written from, computed by the same synth, which is why a one-day album is byte-identical to `render`
+of that day — asserted in the tests, not just claimed here.
+
 ## Roadmap
 
 | Phase | Scope | State |
@@ -327,11 +399,12 @@ window. Pin `--now` and everything downstream is a pure function of the inputs a
 | **3** | Merkle commitments: publish a root, prove inclusion, verify without the log | ✅ |
 | **4** | Live station mode: an incremental, sample-exact synth; a rolling window rendered as the clock moves; raw-PCM streaming | ✅ |
 | **5** | Android/KMP player with timeline scrubbing | ✅ |
-| 6 | Monthly album export: stems, mastering, generative cover art, share card | planned |
+| **6a** | Album export: day-close manifest, per-day tracks, one gain for the whole album, per-day stems | ✅ |
+| **6b** | Generative cover art and share card | planned |
 
 Phase 4 deliberately stops short of "commit the day" — the day-level commitment is already `commit`,
-so a station needs a *day-close* step rather than a new artifact, and that belongs with the album
-export in phase 6.
+so a station needs a *day-close* step rather than a new artifact. The album export is that step: each
+track in `album.json` carries the commitment of the day it was rendered from.
 
 ## Honest limitations
 
@@ -356,7 +429,16 @@ Merkle commitments close the biggest gap, but not every one. Still true today:
 - **A station cannot hear the future.** A slot is played once it closes, so an event that arrives
   later is not retroactively inserted into what you already heard. Re-rendering the same `--now`
   does include it, because a frame is a pure function of the log.
-- **The synth is deliberately plain.** The WAV is clean and listenable, not mastered.
+- **An album is big and slow on purpose.** A full day is ~340 MB of uncompressed WAV and the album
+  synthesises each day twice (once for the peak, once to write), so a 31-day album is ~10 GB and about
+  an hour of CPU. `--stems` multiplies the output by five. `--window` is the honest way to keep an
+  album small.
+- **A skipped day is a decision, not silence.** A day with no entries inside the window is named under
+  `empty_days` instead of becoming an hour of nothing. That keeps a sparse month listenable and keeps
+  the album a pure function of the log.
+- **"Mastered" means one gain, nothing more.** The album is peak-normalised as a whole; there is no
+  compression, EQ or limiting, so it will sound quieter than a commercial record.
+- **The synth is deliberately plain.** The WAV is clean and listenable, not polished.
 
 ## License
 
