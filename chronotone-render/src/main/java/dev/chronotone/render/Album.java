@@ -1,6 +1,7 @@
 package dev.chronotone.render;
 
 import dev.chronotone.core.log.Event;
+import dev.chronotone.core.log.Hashes;
 import dev.chronotone.core.log.LoggedEvent;
 import dev.chronotone.core.merkle.Commitment;
 import dev.chronotone.dsl.MappingSpec;
@@ -62,9 +63,17 @@ public final class Album {
     private Album() {
     }
 
+    /**
+     * What the day sounds like, in numbers small enough to print on a cover: the mode and key the
+     * timeline chose, the tempo range, and the mean of each musical dimension.
+     */
+    public record Music(String mode, int root, int tempoMin, int tempoMax, double energy,
+                        double brightness, double hats, double reverb) {
+    }
+
     /** One day of the album. Hashes are the publishable identity of its audio. */
     public record Track(LocalDate day, Instant from, Instant to, int events, int slots, int notes,
-                        double seconds, String timelineFingerprint, String wavHash,
+                        double seconds, Music music, String timelineFingerprint, String wavHash,
                         String merkleRoot, String chainHead, Map<String, String> stems) {
     }
 
@@ -72,6 +81,19 @@ public final class Album {
 
         public int days() {
             return tracks.size();
+        }
+
+        /**
+         * One identity for the whole album: {@code sha256} over the track hashes in order. It is not
+         * the hash of a file — the tracks are the album — but it names the album exactly and fits on a
+         * cover.
+         */
+        public String fingerprint() {
+            StringBuilder joined = new StringBuilder(tracks.size() * 65);
+            for (Track track : tracks) {
+                joined.append(track.wavHash()).append('\n');
+            }
+            return Hashes.sha256Hex(joined.toString());
         }
 
         public Map<String, Object> toManifest(MappingSpec mapping, long seed, LocalDate from, int requestedDays,
@@ -90,6 +112,7 @@ public final class Album {
             root.put("mastered", "album");
             root.put("peak", WavRenderer.PEAK);
             root.put("seconds", roundMillis(seconds));
+            root.put("fingerprint", fingerprint());
 
             List<Object> tracks = new ArrayList<>(this.tracks.size());
             for (Track track : this.tracks) {
@@ -101,6 +124,16 @@ public final class Album {
                 entry.put("slots", track.slots());
                 entry.put("notes", track.notes());
                 entry.put("seconds", roundMillis(track.seconds()));
+                Map<String, Object> music = new LinkedHashMap<>();
+                music.put("mode", track.music().mode());
+                music.put("root", track.music().root());
+                music.put("tempo_min", track.music().tempoMin());
+                music.put("tempo_max", track.music().tempoMax());
+                music.put("energy", track.music().energy());
+                music.put("brightness", track.music().brightness());
+                music.put("hats", track.music().hats());
+                music.put("reverb", track.music().reverb());
+                entry.put("music", music);
                 entry.put("timeline_sha256", track.timelineFingerprint());
                 entry.put("wav_sha256", track.wavHash());
                 entry.put("merkle_root", track.merkleRoot());
@@ -122,7 +155,8 @@ public final class Album {
 
     /** What pass one learned about a day, without keeping its audio. */
     private record DayPlan(LocalDate day, Instant from, Instant to, int events, int slots, int notes,
-                           int samples, String timelineFingerprint, String merkleRoot, String chainHead) {
+                           int samples, Music music, String timelineFingerprint, String merkleRoot,
+                           String chainHead) {
     }
 
     /**
@@ -175,7 +209,8 @@ public final class Album {
 
             Commitment commitment = Commitment.of(entries);
             plans.add(new DayPlan(day, start, end, entries.size(), timeline.size(), notes.size(),
-                    samples, timeline.fingerprint(), commitment.merkleRoot(), commitment.chainHead()));
+                    samples, summarise(timeline), timeline.fingerprint(), commitment.merkleRoot(),
+                    commitment.chainHead()));
         }
 
         if (plans.isEmpty()) {
@@ -231,13 +266,40 @@ public final class Album {
             }
 
             tracks.add(new Track(plan.day(), plan.from(), plan.to(), plan.events(), plan.slots(),
-                    plan.notes(), plan.samples() / (double) WavRenderer.SAMPLE_RATE,
+                    plan.notes(), plan.samples() / (double) WavRenderer.SAMPLE_RATE, plan.music(),
                     plan.timelineFingerprint(), track.hash(), plan.merkleRoot(), plan.chainHead(),
                     Map.copyOf(stemHashes)));
         }
 
         double seconds = tracks.stream().mapToDouble(Track::seconds).sum();
         return new Result(List.copyOf(tracks), List.copyOf(empty), seconds, stems);
+    }
+
+    /** The timeline's character, averaged over its bars and rounded for a manifest. */
+    private static Music summarise(Timeline timeline) {
+        List<dev.chronotone.core.music.MusicalParams> params = timeline.params();
+        int minTempo = Integer.MAX_VALUE;
+        int maxTempo = Integer.MIN_VALUE;
+        double energy = 0.0;
+        double brightness = 0.0;
+        double hats = 0.0;
+        double reverb = 0.0;
+        for (dev.chronotone.core.music.MusicalParams p : params) {
+            minTempo = Math.min(minTempo, p.tempoBpm());
+            maxTempo = Math.max(maxTempo, p.tempoBpm());
+            energy += p.energy();
+            brightness += p.brightness();
+            hats += p.hatDensity();
+            reverb += p.reverbWet();
+        }
+        int n = params.size();
+        return new Music(timeline.mode().name().toLowerCase(java.util.Locale.ROOT),
+                timeline.rootPitchClass(), minTempo, maxTempo,
+                round3(energy / n), round3(brightness / n), round3(hats / n), round3(reverb / n));
+    }
+
+    private static double round3(double value) {
+        return StrictMath.round(value * 1000.0) / 1000.0;
     }
 
     /** The log entries whose event timestamp falls in {@code [from, to)}. */

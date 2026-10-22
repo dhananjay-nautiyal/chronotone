@@ -166,6 +166,32 @@ class AlbumTest {
     }
 
     @Test
+    void theManifestSummarisesEachDayAndNamesTheAlbum() throws IOException {
+        Path dir = Files.createTempDirectory("chronotone-album-manifest");
+        Path log = logWith(dir, Map.of(DAY_ONE, 6, DAY_TWO, 2));
+
+        Album.Result album = Album.render(MAPPING, EventLog.readEntries(log), DAY_ONE, 2,
+                LocalTime.MIDNIGHT, WINDOW, 42L, dir.resolve("out"), false);
+
+        assertEquals(64, album.fingerprint().length());
+        for (Album.Track track : album.tracks()) {
+            assertTrue(track.music().tempoMin() <= track.music().tempoMax());
+            assertTrue(track.music().energy() >= 0.0 && track.music().energy() <= 1.0);
+            assertTrue(track.music().brightness() >= 0.0 && track.music().brightness() <= 1.0);
+            assertFalse(track.music().mode().isBlank());
+        }
+
+        Map<String, Object> manifest = album.toManifest(MAPPING, 42L, DAY_ONE, 2,
+                LocalTime.MIDNIGHT, WINDOW);
+        assertEquals(album.fingerprint(), manifest.get("fingerprint"));
+        assertTrue(manifest.get("tracks").toString().contains("music"));
+
+        Album.Result reseeded = Album.render(MAPPING, EventLog.readEntries(log), DAY_ONE, 2,
+                LocalTime.MIDNIGHT, WINDOW, 43L, dir.resolve("out-43"), false);
+        assertFalse(album.fingerprint().equals(reseeded.fingerprint()));
+    }
+
+    @Test
     void aRangeWithNoEventsSaysSo() throws IOException {
         Path dir = Files.createTempDirectory("chronotone-album-silent");
         Path log = logWith(dir, Map.of(DAY_ONE, 2));

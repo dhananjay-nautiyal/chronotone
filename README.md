@@ -73,8 +73,10 @@ Phases 1–5 and 6a of the roadmap are complete and working:
   sample offsets — a Swing desktop player and a Compose Android app — and never reads your event log
 - **Album export**: a month of days as one mastered album — a single gain across every track, five
   stems per day, and a manifest that carries each day's Merkle root
+- **Cover and share card**: drawn by the engine from the album manifest alone — a palette chosen by the
+  album's fingerprint, a hand-drawn bitmap font, and a PNG writer whose bytes are identical everywhere
 - **Timeline fingerprint**, `sha256` of the MIDI and WAV, and a chain `verify` command
-- CLI: `init`, `demo`, `sync`, `render`, `album`, `station`, `commit`, `prove`, `check`, `verify`
+- CLI: `init`, `demo`, `sync`, `render`, `album`, `cover`, `station`, `commit`, `prove`, `check`, `verify`
 
 ## Quickstart
 
@@ -197,8 +199,43 @@ What makes it an album rather than a folder:
   (~340 MB of uncompressed WAV) and a 31-day album is ~33 hours and ~10 GB. That is why `--window`
   exists: "the mornings" is a smaller, and often better, album.
 
-### Commitments
+### The cover
 
+An album needs a cover, and a cover should not need a font stack, a browser or an image library — any
+of those would make the picture depend on the machine that drew it. `chronotone cover` reads only
+`album.json` and draws the month with integer arithmetic: an eight-colour palette chosen by the album's
+fingerprint, a 5×7 bitmap font, and a PNG writer that deliberately does not compress.
+
+![The cover of the October album](docs/cover.png)
+
+*Five synthetic days. One column per day, height is that day's mean energy, colour is the root the
+timeline chose; an empty day is a tick on the horizon. The sun is sized by how bright the month was.*
+
+![The share card](docs/share.png)
+
+The card is the same drawing at 1200×630 with the album's facts beside it. The fingerprint is one name
+for the whole album — `sha256` over the track hashes, in order — so the picture, the manifest and the
+audio all refer to the same thing.
+
+Two details are worth the trouble:
+
+- **The PNG bytes are identical on every machine.** The writer emits stored (uncompressed) deflate
+  blocks, because zlib's compressed output depends on the zlib build. The files are ~400 KB; the bytes
+  are ours to guarantee. CI draws the cover twice and `cmp`s the result.
+- **No text is typeset.** Forty-odd 5×7 glyphs (A–Z, 0–9, punctuation) are cheaper than a font
+  dependency and match the machine-drawn look: no anti-aliasing, no hinting, no rounding mode.
+
+`cover` also writes `art.json` with each PNG's dimensions and `sha256`, so artwork can be published and
+checked like any other Chronotone artifact. It needs no log and no second render — a manifest is enough:
+
+```bash
+java -jar "$JAR" cover --album out/album            # -> out/album/art/{cover,share}.png
+```
+
+Four palettes, one composition: enough variation to feel like the album, not so much that the picture
+stops being a function of the music.
+
+### Commitments
 
 The chain and the Merkle tree answer different questions. The chain proves *nothing in this log was
 edited*, but checking it needs every byte. A commitment lets you publish a root and later prove one
@@ -366,9 +403,9 @@ so a day has its own tonal identity. See `chronotone-dsl/src/main/java/dev/chron
 | --- | --- | --- |
 | `chronotone-core` | `Event`, canonical JSON, JSON reader, hash chain, `EventLog`, Merkle tree/proofs/commitments, connector SPI | **none** |
 | `chronotone-dsl` | Mapping DSL: parse, validate, evaluate | core, SnakeYAML |
-| `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth, incremental `StreamingSynth`, live `Station`, album mastering | core, dsl |
+| `chronotone-render` | Timeline, score builder, MIDI writer, PCM/WAV synth, incremental `StreamingSynth`, live `Station`, album mastering, cover art and a dependency-free PNG writer | core, dsl |
 | `chronotone-connectors` | git history, CSV/JSONL exports, Open-Meteo weather, incremental sync | core, SnakeYAML |
-| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `album` / `station` / `commit` / `prove` / `check` / `verify` | all |
+| `chronotone-cli` | `init` / `demo` / `sync` / `render` / `album` / `cover` / `station` / `commit` / `prove` / `check` / `verify` | all |
 | `player/` | Kotlin Multiplatform player: manifest contract, seek math, headless screenshot, Swing + Compose UIs | **none** in `shared` |
 
 ## Determinism rules
@@ -390,6 +427,10 @@ Album mastering adds no new state either. The gain is the peak of the same day m
 written from, computed by the same synth, which is why a one-day album is byte-identical to `render`
 of that day — asserted in the tests, not just claimed here.
 
+The artwork extends the rule to pixels: integer geometry, a fixed bitmap font, and a PNG encoder that
+uses stored deflate blocks instead of asking zlib to compress. No font file, no image library and no
+zlib build can change the bytes of a cover.
+
 ## Roadmap
 
 | Phase | Scope | State |
@@ -400,7 +441,7 @@ of that day — asserted in the tests, not just claimed here.
 | **4** | Live station mode: an incremental, sample-exact synth; a rolling window rendered as the clock moves; raw-PCM streaming | ✅ |
 | **5** | Android/KMP player with timeline scrubbing | ✅ |
 | **6a** | Album export: day-close manifest, per-day tracks, one gain for the whole album, per-day stems | ✅ |
-| **6b** | Generative cover art and share card | planned |
+| **6b** | Generative cover art and share card: palette from the fingerprint, hand-drawn 5×7 font, deterministic PNG | ✅ |
 
 Phase 4 deliberately stops short of "commit the day" — the day-level commitment is already `commit`,
 so a station needs a *day-close* step rather than a new artifact. The album export is that step: each
@@ -438,6 +479,11 @@ Merkle commitments close the biggest gap, but not every one. Still true today:
   the album a pure function of the log.
 - **"Mastered" means one gain, nothing more.** The album is peak-normalised as a whole; there is no
   compression, EQ or limiting, so it will sound quieter than a commercial record.
+- **The cover is not compressed.** Stored deflate keeps the bytes reproducible, at the cost of size:
+  roughly 400 KB for the cover and 370 KB for the card. A compressed PNG is ten times smaller and ten
+  times less predictable.
+- **There are four palettes and one composition.** The album picks a palette by its fingerprint and
+  fills the composition with its own numbers; it does not learn a new visual language from your month.
 - **The synth is deliberately plain.** The WAV is clean and listenable, not polished.
 
 ## License

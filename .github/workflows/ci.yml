@@ -143,6 +143,34 @@ jobs:
           assert worst <= len(stems), worst
           PY
 
+      - name: Prove the cover is a function of the manifest
+        run: |
+          JAR=$(ls chronotone-cli/target/chronotone-cli-*.jar | grep -v original | head -n1)
+          java -jar "$JAR" cover --album out/album-a --out out/album-a/art
+          java -jar "$JAR" cover --album out/album-a --out out/album-a/art2
+
+          # Same manifest, same pixels: the writer emits stored deflate, not zlib's output.
+          cmp out/album-a/art/cover.png out/album-a/art2/cover.png
+          cmp out/album-a/art/share.png out/album-a/art2/share.png
+          cmp out/album-a/art/art.json out/album-a/art2/art.json
+
+          python3 - <<'PY'
+          import json, struct
+
+          art = json.load(open("out/album-a/art/art.json"))
+          assert art["format"] == "chronotone.art/1"
+          assert art["album_fingerprint"] == json.load(open("out/album-a/album.json"))["fingerprint"]
+          for entry in ("cover", "share"):
+              data = open("out/album-a/art/%s.png" % entry, "rb").read()
+              assert data[:8] == b"\x89PNG\r\n\x1a\n"
+              width, height, depth, colour = struct.unpack(">IIBB", data[16:26])
+              assert (width, height) == (art[entry]["width"], art[entry]["height"])
+              assert depth == 4 and colour == 3, "not an indexed 4-bit PNG"
+              assert len(data) > 1000
+          assert open("out/album-a/art/cover.png", "rb").read() != \
+                 open("out/album-a/art/share.png", "rb").read()
+          PY
+
       - name: Build and test the player
         working-directory: player
         run: ./gradlew --no-daemon :shared:jvmTest :desktopApp:test :androidApp:assembleDebug

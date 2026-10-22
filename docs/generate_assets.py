@@ -21,6 +21,9 @@ terminal.png  a captured station session, rendered as a terminal window
 day.png       the day as five bands of real data, audio included
 station.gif   the 30-minute station window walking across that day
 
+The cover and share card are not drawn here. They are engine output — `chronotone cover` reads the
+album manifest and writes the PNGs itself — so those two files have no Python in them at all.
+
 Usage
 -----
   python3 docs/generate_assets.py --wav out/day/chronotone.wav --day out/day/day.csv --out docs
