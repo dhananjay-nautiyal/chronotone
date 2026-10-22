@@ -9,6 +9,7 @@ import dev.chronotone.core.log.CanonicalJson;
 import dev.chronotone.core.log.Event;
 import dev.chronotone.core.log.EventLog;
 import dev.chronotone.core.log.Hashes;
+import dev.chronotone.core.log.Json;
 import dev.chronotone.core.log.LoggedEvent;
 import dev.chronotone.core.log.VerifyResult;
 import dev.chronotone.core.merkle.Commitment;
@@ -23,6 +24,8 @@ import dev.chronotone.render.Chronotone;
 import dev.chronotone.render.RenderResult;
 import dev.chronotone.render.Station;
 import dev.chronotone.render.WavRenderer;
+import dev.chronotone.render.art.AlbumArt;
+import dev.chronotone.render.art.Png;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -72,6 +75,7 @@ public final class Main {
                 case "sync" -> sync(options);
                 case "render" -> render(options);
                 case "album" -> album(options);
+                case "cover" -> cover(options);
                 case "station" -> station(options);
                 case "commit" -> commit(options);
                 case "prove" -> prove(options);
@@ -284,6 +288,64 @@ public final class Main {
                 + (stems ? ", " + out.resolve("stems") : ""));
         System.out.println();
         System.out.println("render again with the same arguments: every track hash must not change.");
+    }
+
+    /**
+     * Cover art for a finished album.
+     *
+     * <p>Reads {@code album.json} and nothing else: no log, no second render. That keeps the promise
+     * the whole project is built on — the manifest is publishable, so the artwork is reproducible by
+     * anyone who has it.
+     */
+    private static void cover(Map<String, String> options) throws IOException {
+        Path albumDir = Path.of(options.getOrDefault("album", "out/album"));
+        Path manifestFile = albumDir.resolve("album.json");
+        if (!Files.exists(manifestFile)) {
+            throw new IllegalStateException("no " + manifestFile + " — run `chronotone album` first");
+        }
+        Path out = Path.of(options.getOrDefault("out", albumDir.resolve("art").toString()));
+        int size = Integer.parseInt(options.getOrDefault("size", String.valueOf(AlbumArt.COVER_SIZE)));
+
+        AlbumArt.Album album = AlbumArt.Album.fromManifest(Json.parseObject(Files.readString(manifestFile)));
+        Png.Image cover = AlbumArt.cover(album, size);
+        Png.Image share = AlbumArt.share(album);
+
+        Files.createDirectories(out);
+        Files.write(out.resolve("cover.png"), cover.bytes());
+        Files.write(out.resolve("share.png"), share.bytes());
+
+        Map<String, Object> art = new LinkedHashMap<>();
+        art.put("format", "chronotone.art/1");
+        art.put("album_fingerprint", album.fingerprint());
+        art.put("cover", describe(cover, "cover.png"));
+        art.put("share", describe(share, "share.png"));
+        Files.writeString(out.resolve("art.json"), CanonicalJson.write(art));
+
+        System.out.println("album       " + album.from() + " .. "
+                + album.from().plusDays(album.columns() - 1)
+                + "  (" + album.days().size() + " tracks, " + album.span() + ")");
+        System.out.println("fingerprint " + album.fingerprint());
+        System.out.println("cover       " + cover.width() + "x" + cover.height() + "  "
+                + kilobytes(cover.bytes().length) + "  " + shortHash(Hashes.sha256Hex(cover.bytes())));
+        System.out.println("share       " + share.width() + "x" + share.height() + "  "
+                + kilobytes(share.bytes().length) + "  " + shortHash(Hashes.sha256Hex(share.bytes())));
+        System.out.println("wrote       " + out.resolve("cover.png") + ", " + out.resolve("share.png")
+                + ", " + out.resolve("art.json"));
+        System.out.println();
+        System.out.println("same manifest, same pixels: the PNGs carry no time and no machine name.");
+    }
+
+    private static Map<String, Object> describe(Png.Image image, String file) {
+        Map<String, Object> entry = new LinkedHashMap<>();
+        entry.put("file", file);
+        entry.put("width", image.width());
+        entry.put("height", image.height());
+        entry.put("sha256", Hashes.sha256Hex(image.bytes()));
+        return entry;
+    }
+
+    private static String kilobytes(int bytes) {
+        return String.format(Locale.ROOT, "%.1f KB", bytes / 1024.0);
     }
 
     private static String clock(double seconds) {
@@ -691,6 +753,7 @@ public final class Main {
                   chronotone album   [--log <file>] [--out <dir>] [--month <yyyy-MM>]
                                      [--from <yyyy-MM-dd> --days <n>] [--start <HH:mm>]
                                      [--window <dur>] [--stems] [--seed <n>] [--mapping <file>]
+                  chronotone cover   [--album <dir>] [--out <dir>] [--size <px>]
                   chronotone station [--log <file>] [--out <dir>] [--mapping <file>] [--seed <n>]
                                      [--window <dur>] [--now <iso>] [--follow] [--every <dur>]
                                      [--ticks <n>] [--stream]
@@ -718,6 +781,7 @@ public final class Main {
                 publishing a month as an album:
                   chronotone album --month 2026-10 --seed 42
                   chronotone album --month 2026-10 --stems            # + pad/bass/lead/kick/hat
+                  chronotone cover --album out/album                  # cover.png + share.png
 
                 publishing a hash without publishing your day:
                   chronotone commit --day 2026-10-19 --out out/commitment.json
