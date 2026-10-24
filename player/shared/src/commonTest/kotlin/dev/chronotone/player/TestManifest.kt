@@ -9,6 +9,8 @@ internal fun manifestJson(
     from: String = "2026-10-19T21:44:00.000Z",
     to: String = "2026-10-19T21:47:00.000Z",
     bounds: List<Int> = listOf(0, 100, 250, 399, 500),
+    timelineSha256: String = "aa11",
+    wavSha256: String = "bb22",
 ): String = """
     {
       "format": "$format",
@@ -23,8 +25,8 @@ internal fun manifestJson(
       "notes": 10,
       "seconds": 0.011,
       "slot_samples": [${bounds.joinToString(", ")}],
-      "timeline_sha256": "aa11",
-      "wav_sha256": "bb22",
+      "timeline_sha256": "$timelineSha256",
+      "wav_sha256": "$wavSha256",
       "timeline": "$slots slots"
     }
 """.trimIndent()

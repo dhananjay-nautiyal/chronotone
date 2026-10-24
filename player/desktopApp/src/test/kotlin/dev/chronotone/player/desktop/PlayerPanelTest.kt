@@ -50,12 +50,21 @@ class PlayerPanelTest {
     /** A three-bar frame with a decaying tone, so the waveform has a shape to draw. */
     private fun fixture(): StationFrame {
         val directory = Files.createTempDirectory("chronotone-player")
-        writeWav(directory.resolve("chronotone.wav"), frames = 500)
-        Files.writeString(directory.resolve("station.json"), manifest(samples = 500))
+        val wav = writeWav(directory.resolve("chronotone.wav"), frames = 500)
+        // The manifest must describe this very WAV: StationFrame.open verifies wav_sha256.
+        Files.writeString(
+            directory.resolve("station.json"),
+            manifest(samples = 500, wavSha256 = sha256Hex(wav)),
+        )
         return StationFrame.open(directory)
     }
 
-    private fun manifest(samples: Int): String = """
+    private fun sha256Hex(bytes: ByteArray): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(bytes)
+            .joinToString("") { "%02x".format(java.util.Locale.ROOT, it) }
+
+    private fun manifest(samples: Int, wavSha256: String = "bb22"): String = """
         {
           "format": "chronotone.station/1",
           "mapping": "v1.0",
@@ -70,12 +79,12 @@ class PlayerPanelTest {
           "seconds": 0.011,
           "slot_samples": [0, 100, 250, 399, $samples],
           "timeline_sha256": "aa11",
-          "wav_sha256": "bb22",
+          "wav_sha256": "$wavSha256",
           "timeline": "3 slots"
         }
     """.trimIndent()
 
-    private fun writeWav(path: Path, frames: Int) {
+    private fun writeWav(path: Path, frames: Int): ByteArray {
         val out = ByteArrayOutputStream()
         fun ascii(text: String) = out.write(text.toByteArray(Charsets.US_ASCII))
         fun i32(value: Int) {
@@ -97,7 +106,9 @@ class PlayerPanelTest {
             val fade = 1.0 - i.toDouble() / frames
             i16((sin(i * 0.07) * 12_000 * fade).toInt())
         }
-        Files.write(path, out.toByteArray())
+        val bytes = out.toByteArray()
+        Files.write(path, bytes)
+        return bytes
     }
 
     private fun distinctColours(image: BufferedImage): Int {
