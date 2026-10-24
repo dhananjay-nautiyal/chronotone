@@ -192,6 +192,33 @@ class AlbumTest {
     }
 
     @Test
+    void aTrackHearsTheHourBeforeItsWindow() throws IOException {
+        // The mapping's look-back windows (reverbWet 60m, brightness 30m, tempo 10m) read the
+        // events before the track's window; a render of the same window sees them, so an album
+        // track must too.
+        Path dir = Files.createTempDirectory("chronotone-album-lookback");
+        Path log = dir.resolve("log.jsonl");
+        Instant windowStart = DAY_ONE.atTime(LocalTime.NOON).toInstant(ZoneOffset.UTC);
+        try (EventLog eventLog = EventLog.open(log)) {
+            Instant earlier = windowStart.minus(Duration.ofHours(1));
+            for (int i = 0; i < 6; i++) {
+                eventLog.append(new Event("health", "steps", earlier.plusSeconds(600L * i),
+                        Map.of("steps", 120 + 30 * i)));
+            }
+            eventLog.append(new Event("git", "commit", windowStart.plusSeconds(30), Map.of("lines_changed", 40)));
+        }
+        List<LoggedEvent> ledger = EventLog.readEntries(log);
+
+        Album.Result album = Album.render(MAPPING, ledger, DAY_ONE, 1, LocalTime.NOON, WINDOW,
+                42L, dir.resolve("album"), false);
+        RenderResult render = Chronotone.render(MAPPING, eventsOf(ledger), windowStart,
+                windowStart.plus(WINDOW), 42L);
+
+        assertEquals(render.wavHash(), album.tracks().getFirst().wavHash(),
+                "an album track must hear the events before its window, as render does");
+    }
+
+    @Test
     void aRangeWithNoEventsSaysSo() throws IOException {
         Path dir = Files.createTempDirectory("chronotone-album-silent");
         Path log = logWith(dir, Map.of(DAY_ONE, 2));
