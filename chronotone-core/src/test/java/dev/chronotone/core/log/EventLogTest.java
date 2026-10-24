@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -114,5 +115,22 @@ class EventLogTest {
     @Test
     void readEventsOnAMissingLogIsEmpty() throws IOException {
         assertTrue(EventLog.readEvents(tempDir.resolve("nope.jsonl")).isEmpty());
+    }
+
+    @Test
+    void reopensALogWhosePayloadNumbersExceedTheLongRange() throws IOException {
+        // A payload value CanonicalJson writes as plain digits beyond the long range must still
+        // be readable — otherwise one such event bricks the log it was appended to.
+        Map<String, Object> payload = Map.of("big", new BigInteger("99999999999999999999"));
+        try (EventLog log = EventLog.open(logFile())) {
+            log.append(Event.of("test", "reading", T0, payload));
+        }
+        try (EventLog reopened = EventLog.open(logFile())) {
+            assertEquals(1, reopened.size());
+            assertEquals(new BigInteger("99999999999999999999"),
+                    reopened.entries().getFirst().event().payload().get("big"));
+        }
+        VerifyResult result = EventLog.verify(logFile());
+        assertTrue(result.ok(), result.message());
     }
 }

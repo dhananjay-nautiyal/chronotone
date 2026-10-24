@@ -1,5 +1,6 @@
 package dev.chronotone.core.log;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -7,8 +8,9 @@ import java.util.Map;
 
 /**
  * Minimal, dependency-free JSON reader. Round-trips exactly with {@link CanonicalJson}: integers
- * decode to {@link Long}, decimals to {@link Double}, objects to insertion-ordered maps and arrays
- * to lists. The log format is ours, so a full JSON library would be dead weight.
+ * decode to {@link Long} (or {@link java.math.BigInteger} beyond the long range, which
+ * {@code CanonicalJson} can also emit), decimals to {@link Double}, objects to insertion-ordered
+ * maps and arrays to lists. The log format is ours, so a full JSON library would be dead weight.
  */
 public final class Json {
 
@@ -195,7 +197,16 @@ public final class Json {
                 throw fail("Expected a number");
             }
             try {
-                return decimal ? (Object) Double.valueOf(raw) : (Object) Long.valueOf(raw);
+                if (decimal) {
+                    return Double.valueOf(raw);
+                }
+                try {
+                    return Long.valueOf(raw);
+                } catch (NumberFormatException overflow) {
+                    // CanonicalJson writes BigInteger and large-double payloads as plain digits,
+                    // so the reader must be able to decode them back or the log would brick.
+                    return new BigInteger(raw);
+                }
             } catch (NumberFormatException e) {
                 throw fail("Invalid number '" + raw + "'");
             }
