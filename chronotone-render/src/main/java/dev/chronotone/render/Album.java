@@ -180,6 +180,11 @@ public final class Album {
         List<LocalDate> empty = new ArrayList<>();
         double peak = 0.0;
 
+        // The mapping's windows look back beyond the track's own start, so every timeline is built
+        // from the whole history up to the window's end — exactly as `render` of that window is.
+        // The day's own entries still decide the commitment and the counts.
+        List<Event> history = ledger.stream().map(LoggedEvent::event).toList();
+
         for (int i = 0; i < days; i++) {
             LocalDate day = from.plusDays(i);
             Instant start = day.atTime(dayStart).toInstant(ZoneOffset.UTC);
@@ -190,8 +195,7 @@ public final class Album {
                 continue;
             }
 
-            List<Event> events = entries.stream().map(LoggedEvent::event).toList();
-            Timeline timeline = Timeline.of(mapping, events, start, end);
+            Timeline timeline = Timeline.of(mapping, history, start, end);
             List<NoteEvent> notes = new ScoreBuilder(timeline, seed).build();
 
             StreamingSynth synth = new StreamingSynth(timeline, notes);
@@ -227,9 +231,7 @@ public final class Album {
 
         List<Track> tracks = new ArrayList<>(plans.size());
         for (DayPlan plan : plans) {
-            List<Event> events = entriesIn(ledger, plan.from(), plan.to()).stream()
-                    .map(LoggedEvent::event).toList();
-            Timeline timeline = Timeline.of(mapping, events, plan.from(), plan.to());
+            Timeline timeline = Timeline.of(mapping, history, plan.from(), plan.to());
             List<NoteEvent> notes = new ScoreBuilder(timeline, seed).build();
             StreamingSynth full = new StreamingSynth(timeline, notes);
 
