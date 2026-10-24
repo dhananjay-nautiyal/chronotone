@@ -384,6 +384,12 @@ public final class Main {
         boolean stream = Boolean.parseBoolean(options.getOrDefault("stream", "false"));
         Instant pinned = options.containsKey("now") ? Instant.parse(options.get("now")) : null;
         int ticks = Integer.parseInt(options.getOrDefault("ticks", follow ? "-1" : "1"));
+        if (pinned != null && follow && ticks < 0) {
+            // Without this, the loop below has no clock to wait for and no end to reach: it
+            // re-renders the same advancing pinned timeline as fast as it can, forever.
+            throw new IllegalStateException("station --now with --follow needs --ticks"
+                    + " — a pinned clock has no 'now' to wait for");
+        }
 
         MappingSpec mapping = new MappingParser().parse(mappingYaml(options));
         if (window.compareTo(mapping.grid()) < 0) {
