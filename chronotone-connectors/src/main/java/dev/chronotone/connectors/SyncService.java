@@ -69,6 +69,13 @@ public final class SyncService {
                 List<Event> events;
                 try (Connector connector = ConnectorFactory.create(config)) {
                     events = connector.fetch(start, to);
+                } catch (RuntimeException failure) {
+                    // One broken connector (missing file, bad row, unreachable API) must not block
+                    // the others: report it and leave its watermark alone, so the next sync
+                    // retries exactly this connector from where it stopped.
+                    reports.add(new ConnectorReport(config.id(), config.type(), start, to,
+                            0, 0, 0, failure.getMessage()));
+                    continue;
                 }
                 fetched = events.size();
                 for (Event event : events) {

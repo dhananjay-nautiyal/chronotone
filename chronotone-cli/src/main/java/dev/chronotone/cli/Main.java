@@ -164,6 +164,11 @@ public final class Main {
         SyncResult result = new SyncService(log).sync(configs, from, to, dryRun);
         System.out.println(result.summary());
         System.out.println("watermarks " + result.watermarkPath());
+        long failed = result.connectors().stream().filter(report -> report.failure() != null).count();
+        if (failed > 0) {
+            System.err.println("warn       " + failed + " of " + result.connectors().size()
+                    + " connector(s) failed — their watermarks were not advanced, so the next sync retries them");
+        }
     }
 
     /** Renders a window of the log to MIDI + WAV + a hash manifest. */
