@@ -174,6 +174,21 @@ class FileConnectorTest {
     }
 
     @Test
+    void aUtf8BomDoesNotHideEveryRow() throws IOException {
+        // Windows-written exports often carry a BOM; without stripping it the first header
+        // becomes "\uFEFFstart_time", time_column never matches and every row is skipped.
+        Path csv = write("bom.csv", "\uFEFFstart_time,steps\n2026-10-19T07:12:00Z,412\n");
+        ConnectorConfig config = new ConnectorConfig("steps", "file", Map.of(
+                "path", csv.toString(),
+                "time_column", "start_time",
+                "event_source", "health",
+                "event_type", "steps"));
+        List<Event> events = new FileConnector(config).fetch(FROM, TO);
+        assertEquals(1, events.size());
+        assertEquals(412L, events.getFirst().payload().get("steps"));
+    }
+
+    @Test
     void detectsJsonlFromTheExtension() throws IOException {
         Path jsonl = write("auto.jsonl", """
                 {"played_at":"2026-10-19T21:05:00Z","track":"Awake"}

@@ -82,6 +82,11 @@ public final class FileConnector implements Connector {
         List<Map<String, String>> rows;
         try {
             String content = Files.readString(path, StandardCharsets.UTF_8);
+            if (content.startsWith("\uFEFF")) {
+                // A BOM (normal in Windows-written exports) would become part of the first
+                // header name, so time_column would never match and every row would be skipped.
+                content = content.substring(1);
+            }
             rows = "jsonl".equals(format) ? jsonl(content) : csv(content);
         } catch (IOException e) {
             throw new ConnectorException("connector '" + id + "': cannot read " + path, e);
