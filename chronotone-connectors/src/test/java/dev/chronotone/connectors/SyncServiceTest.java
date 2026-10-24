@@ -149,4 +149,31 @@ class SyncServiceTest {
         SyncResult result = new SyncService(log, watermarks).sync(List.of(connector()), FROM, TO, true);
         assertEquals(watermarks, result.watermarkPath());
     }
+
+    @Test
+    void oneFailingConnectorDoesNotBlockTheOthers() throws IOException {
+        prepare();
+        ConnectorConfig broken = new ConnectorConfig("absent", "file", Map.of(
+                "path", tempDir.resolve("absent.csv").toString(),
+                "time_column", "start_time",
+                "event_source", "health",
+                "event_type", "steps"));
+
+        SyncResult result = new SyncService(log, watermarks)
+                .sync(List.of(broken, connector()), FROM, TO, false);
+
+        assertEquals(3, result.appended(), "the healthy connector still contributes its events");
+        assertEquals(2, result.connectors().size());
+        ConnectorReport failed = result.connectors().getFirst();
+        assertEquals("absent", failed.id());
+        assertTrue(failed.failure().contains("absent.csv"), failed.failure());
+        assertEquals(0, failed.fetched());
+        assertEquals(3, result.connectors().get(1).fetched());
+
+        // The healthy connector's watermark advanced; the broken one has none, so the next
+        // sync retries exactly it.
+        Watermarks marks = Watermarks.load(watermarks);
+        assertTrue(marks.get("steps").isPresent());
+        assertTrue(marks.get("absent").isEmpty());
+    }
 }
