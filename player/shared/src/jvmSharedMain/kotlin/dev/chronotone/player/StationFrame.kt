@@ -3,6 +3,8 @@ package dev.chronotone.player
 import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
+import java.util.Locale
 import kotlin.math.abs
 
 /** A rendered frame on disk: the manifest that describes it and the WAV that is it. */
@@ -32,7 +34,30 @@ class StationFrame(
                     "these files are from different renders"
             }
 
+            // Frame counts and slot bounds are functions of window and grid only, so two renders
+            // of the same window with a different seed or a different log have identical geometry
+            // and would pass the check above. The engine publishes wav_sha256 so a wrong, stale
+            // or partially copied WAV can be caught before a note of it plays.
+            val actual = sha256Hex(wavPath)
+            require(actual == manifest.wavSha256) {
+                "chronotone.wav has sha256 $actual but station.json describes ${manifest.wavSha256} — " +
+                    "these files are from different renders"
+            }
+
             return StationFrame(manifest, Timeline(manifest), wav)
+        }
+
+        private fun sha256Hex(path: Path): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            Files.newInputStream(path).use { input ->
+                val buffer = ByteArray(1 shl 16)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            return digest.digest().joinToString("") { "%02x".format(Locale.ROOT, it) }
         }
     }
 }
